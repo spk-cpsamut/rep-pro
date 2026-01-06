@@ -1608,6 +1608,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-kms",
  "base64",
+ "dotenvy",
  "serde",
  "serde_json",
  "sqlx",
