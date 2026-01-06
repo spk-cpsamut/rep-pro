@@ -1,7 +1,8 @@
+use serde::Serialize;
 pub struct Client {
-    username: String,
-    password: String,
-    config: Config
+    pub username: String,
+    pub password: String,
+    pub config: Config,
 }
 
 impl Client {
@@ -14,6 +15,7 @@ impl Client {
     }
 }
 
-struct Config {
+#[derive(Serialize)]
+pub struct Config {
 
 }
