@@ -1,12 +1,11 @@
 mod clilent;
 mod server;
-use std::fmt::Error;
-
 use clilent::Client;
-
 #[tokio::main]
-async fn main(){
+async fn main() ->  Result<(), Box<dyn std::error::Error>>{
+    dotenvy::dotenv().ok();
     let client = Client::new();
+    server::encrypt(client).await.expect("server encrypt failed");
 
-    server::encrypt(client).await;
+    Ok(())
 }

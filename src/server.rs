@@ -8,39 +8,40 @@ use aws_sdk_kms::{
     primitives::Blob,
 };
 use base64::{Engine, engine};
+use std::env;
 pub async fn encrypt(client: Client) -> Result<(), Box<dyn std::error::Error>> {
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .profile_name("rep-pro-dev")
+        .profile_name(&env::var("AWS_PROFILE_NAME")?)
         .load()
         .await;
     let kms_client = aws_sdk_kms::Client::new(&config);
-    let kms_id = "27967f4b-419c-490e-8a80-01bcd7e95767";
+
 
     let blob_username = Blob::new(client.username);
     let blob_password = Blob::new(client.password);
     let resoruce_config_json = serde_json::to_string(&client.config);
 
-    let enctyped_username = kms_client
+    let enctyped_username_future = kms_client
         .encrypt()
-        .key_id(&kms_id.to_string())
+        .key_id(&env::var("KMS_ID")?)
         .plaintext(blob_username)
-        .send()
-        .await;
-    let enctypted_password = kms_client
+        .send();
+    let enctypted_password_future = kms_client
         .encrypt()
-        .key_id(&kms_id.to_string())
+        .key_id(&env::var("KMS_ID")?)
         .plaintext(blob_password)
-        .send()
-        .await;
+        .send();
+
+    let (enctyped_username, enctypted_password) = tokio::join!(enctyped_username_future, enctypted_password_future);
 
     let base64_encrypted_username =
         engine::general_purpose::STANDARD.encode(unwrap_ciphertext(enctyped_username)?);
     let base64_encrypted_password =
         engine::general_purpose::STANDARD.encode(unwrap_ciphertext(enctypted_password)?);
 
-        println!("username : {}", base64_encrypted_username);
-        println!("password : {}", base64_encrypted_password);
-        println!("config : {:?}", resoruce_config_json?);
+    println!("username : {}", base64_encrypted_username);
+    println!("password : {}", base64_encrypted_password);
+    println!("config : {:?}", resoruce_config_json?);
 
     Ok(())
 }
