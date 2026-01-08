@@ -41,7 +41,7 @@ pub async fn encrypt(client: Client) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("username : {}", base64_encrypted_username);
     println!("password : {}", base64_encrypted_password);
-    println!("config : {:?}", resoruce_config_json?);
+    println!("config : {}", resoruce_config_json?);
 
     Ok(())
 }

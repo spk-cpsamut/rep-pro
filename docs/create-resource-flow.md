@@ -51,3 +51,21 @@ sequenceDiagram
     RSR -->> S: (resources_relation_id)
     S ->> RS: insertRules(rules, resources_relation_id)
 ```
+
+<br>
+<br>
+
+### ER diagram
+
+```mermaid
+erDiagram
+Resource {
+    UUID id PK
+    cipher_text username
+    cipher_text password
+    cipher_text config
+    TIMESTAMP_WITH_TZ created_at
+    TIMESTAMP_WITH_TZ updated_at
+}
+```
+
