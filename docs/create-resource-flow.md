@@ -1,6 +1,6 @@
 # overall workflows
 
-This documents provide comprehensive workflows in rep-pro, it act like the single source of truth as long as we found something better
+This documents provide comprehensive workflows in rep-pro, it act like the single source of truth as long as we not found something better
 
 ## Create resource
 
