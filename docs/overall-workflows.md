@@ -1,6 +1,6 @@
 # overall workflows
 
-This documents provide comprehensive workflows in rep-pro, it act like the single source of truth as long as we not found something better
+This documents provide comprehensive workflows in rep-pro, it act like the single source of truth.
 
 ## Create resource
 
@@ -36,7 +36,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     box
-    participant C as Client
+    actor C as Client
     end
     box internal
     participant S as Service
@@ -44,22 +44,22 @@ sequenceDiagram
     box Database
     participant R as resources
     participant RS as rules
-    participant RSR as resources_relation
+    participant RSM as resources_maps
     end
-    C ->> S: setMappingRules(source: resource_id, target: resource_id)
-    S ->> RSR: insertResourcesRules(source, target)
-    RSR -->> S: (resources_relation_id)
-    S ->> RS: insertRules(rules, resources_relation_id)
+    C ->> S: setMappingRules(source: {resource_id, table}, target: {resource_id, table}, rules[])
+    S ->> RSM : insert resource_map(source: {resource_id, table}, target: {resource_id, table})
+    RSM -->> S : resource_map_id
+    S ->> RS: insertRules(resource_map_id, rules[])
 ```
 
 <br>
 <br>
 
-### ER diagram
+## ER diagram
 
 ```mermaid
 erDiagram
-Resource {
+resource {
     UUID id PK
     cipher_text username
     cipher_text password
@@ -67,5 +67,23 @@ Resource {
     TIMESTAMP_WITH_TZ created_at
     TIMESTAMP_WITH_TZ updated_at
 }
-```
 
+resource_map {
+    UUID id PK
+    UUID resource_source FK
+    UUID resource_target FK
+    VARCHAR225 table_source
+    VARCHAR255 table_target
+}
+
+rule {
+    UUID id PK
+    UUID resource_map_id
+    JSONB rule
+}
+
+resource }o -- o{ resource_map: source
+resource }o -- o{ resource_map: target
+
+resource_map || -- |{ rule: has
+```
