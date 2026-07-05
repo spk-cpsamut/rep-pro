@@ -215,12 +215,10 @@ impl ResourceConnection for PostgresConnection {
         rules: Rules,
     ) -> Result<(), SanitizeError> {
         todo!();
-        Ok(())
     }
 
     async fn push(&mut self, rx: mpsc::Receiver<Vec<SanitizedRecord>>) -> Result<(), PushError> {
         todo!();
-        Ok(())
     }
 }
 enum HostError {

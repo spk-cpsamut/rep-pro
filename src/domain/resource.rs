@@ -64,7 +64,6 @@ pub enum SanitizeError {}
 
 #[async_trait::async_trait]
 trait ResourceConnection {
-    // need to know which column to sanitize
     async fn pull(&mut self, tx: mpsc::Sender<Vec<Record>>, rules: Rules) -> Result<(), PullError>;
     async fn sanitize(
         &mut self,
