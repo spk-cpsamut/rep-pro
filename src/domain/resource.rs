@@ -1,3 +1,4 @@
+use errors::*;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -24,8 +25,6 @@ trait Config {
         Self::Connection: ResourceConnection;
 }
 
-
-
 // we can replace Value with vec of field & value
 pub struct Record(Value);
 
@@ -41,26 +40,18 @@ pub enum NamingConvention {
 pub struct FieldRecord {
     sanitize_type: SanitizeType,
     field_name: String,
-    identifier: String
+    identifier: String,
 }
 pub struct SanitizedRecord {}
 
 pub enum SanitizeType {}
 
-
-
 pub struct Rules {
     force_pull_from_start: bool,
     source_naming_convention: NamingConvention,
     target_naming_convention: NamingConvention,
-    source_sanitize_fields: Vec<FieldRecord>
+    source_sanitize_fields: Vec<FieldRecord>,
 }
-pub enum PullError {
-    FailedToGetPointer,
-    FailedToExtactData
-}
-pub enum PushError {}
-pub enum SanitizeError {}
 
 #[async_trait::async_trait]
 trait ResourceConnection {
@@ -72,4 +63,13 @@ trait ResourceConnection {
         rules: Rules,
     ) -> Result<(), SanitizeError>;
     async fn push(&mut self, rx: mpsc::Receiver<Vec<SanitizedRecord>>) -> Result<(), PushError>;
+}
+
+mod errors {
+    pub enum PullError {
+        FailedToGetPointer,
+        FailedToExtactData,
+    }
+    pub enum PushError {}
+    pub enum SanitizeError {}
 }

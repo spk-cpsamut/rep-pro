@@ -1,33 +1,35 @@
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
-use sqlx::{Column, PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions};
+use sqlx::{Column, PgPool, Pool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions};
 use tokio::sync::mpsc;
 
 use crate::domain::resource::{
     Config, ConnectionError, PullError, PushError, Record, ResourceConnection, Rules,
     SanitizeError, SanitizedRecord,
 };
+
 use std::u32;
 
+use errors::*;
 pub struct PostgresConfig {
     host: Host,
-    port: Port,
+    port: u16,
     username: Username,
     password: Password,
     database_name: DatabaseName,
     table: String,
-    pull_batch_startegy: PullBatchStartegy,
+    pull_batch_startegy: PullBatchStrategy,
 }
 
 impl PostgresConfig {
     pub fn new(
         host: Host,
-        port: Port,
+        port: u16,
         username: Username,
         password: Password,
         database_name: DatabaseName,
         table: String,
-        pull_batch_startegy: PullBatchStartegy,
+        pull_batch_startegy: PullBatchStrategy,
     ) -> Self {
         Self {
             host,
@@ -50,7 +52,7 @@ impl Config for PostgresConfig {
             self.username.as_ref().expose_secret(),
             self.password.as_ref().expose_secret(),
             self.host.as_ref(),
-            self.port.0,
+            self.port,
             self.database_name.as_ref()
         );
 
@@ -59,16 +61,16 @@ impl Config for PostgresConfig {
             .map_err(|_| ConnectionError::FailedToConnect)?;
         Ok(PostgresConnection {
             pool,
-            pull_batch_size: PullBatchSize::parse(100000),
-            sanitize_batch_size: PullBatchSize::parse(100000),
-            pull_batch_startegy: self.pull_batch_startegy.clone(),
+            pull_batch_size: PullBatchSize::new(100000),
+            sanitize_batch_size: PullBatchSize::new(100000),
+            pull_batch_strategy: self.pull_batch_startegy.clone(),
             table: self.table.clone(),
         })
     }
 }
 
 #[derive(Clone)]
-pub enum PullBatchStartegy {
+pub enum PullBatchStrategy {
     Cursor {
         field: String,
         pointer: Option<String>,
@@ -84,128 +86,41 @@ pub struct PostgresConnection {
     table: String,
     pull_batch_size: PullBatchSize,
     sanitize_batch_size: PullBatchSize,
-    pull_batch_startegy: PullBatchStartegy,
+    pull_batch_strategy: PullBatchStrategy,
 }
 
 #[derive(Clone)]
-struct PullBatchSize(String);
-enum PullBatchSizeError {
-    CannotConvertBackToU32,
-}
+struct PullBatchSize(u32);
 
 impl PullBatchSize {
-    pub fn parse(size: u32) -> Self {
-        Self(size.to_string())
+    pub fn new(size: u32) -> Self {
+        Self(size)
     }
 
-    pub fn to_u32(&self) -> u32 {
-        self.as_ref()
-            .parse::<u32>()
-            .expect("it should convert to u32 properly as the original value is u32")
-    }
-}
-
-impl AsRef<str> for PullBatchSize {
-    fn as_ref(&self) -> &str {
-        &self.0
+    fn get(&self) -> u32 {
+        self.0
     }
 }
 
 #[derive(Clone)]
-struct SqlOffset(String);
+struct SqlOffset(u32);
 
 impl SqlOffset {
-    pub fn parse(size: u32) -> Self {
-        Self(size.to_string())
-    }
-}
-
-impl AsRef<str> for SqlOffset {
-    fn as_ref(&self) -> &str {
-        &self.0
+    pub fn new(size: u32) -> Self {
+        Self(size)
     }
 }
 
 #[async_trait::async_trait]
 impl ResourceConnection for PostgresConnection {
     async fn pull(&mut self, tx: mpsc::Sender<Vec<Record>>, rules: Rules) -> Result<(), PullError> {
-        let startegy = self.pull_batch_startegy.clone();
+        let strategy = self.pull_batch_strategy.clone();
         let table = self.table.clone();
         let batch_size = self.pull_batch_size.clone();
         let pg_pool = self.pool.clone();
 
-        let task = tokio::spawn(async move {
-            let mut startegy = startegy;
-            match startegy {
-                PullBatchStartegy::Cursor { field, pointer } => {
-                    let mut pointer = pointer;
-                    let mut first_run = true;
-                    let mut records: Vec<Record> = Vec::new();
-                    loop {
-                        let mut qb = QueryBuilder::<Postgres>::new(format!(
-                            "SELECT * FROM {} WHERE 1=1",
-                            table
-                        ));
-
-                        if let Some(p) = &pointer
-                            && !(rules.force_pull_from_start && first_run)
-                        {
-                            qb.push(format!("AND {} >", &field));
-                            qb.push_bind(p);
-                        }
-
-                        qb.push(format!(" ORDER BY {} LIMIT", &field));
-                        qb.push_bind(batch_size.as_ref());
-
-                        let rows = qb.build().fetch_all(&pg_pool).await.unwrap();
-
-                        if rows.is_empty() {
-                            todo!("write pointer back to database");
-                            break;
-                        }
-
-                        for row in rows.iter() {
-                            let new_ptr: String = row
-                                .try_get(&field.as_str())
-                                .map_err(|_| PullError::FailedToGetPointer)?;
-
-                            pointer = Some(new_ptr);
-
-                            let columns = row.columns();
-
-                            let mut row_json = json!({ "items": []});
-
-                            for column in columns.iter() {
-                                let value: String = row
-                                    .try_get(column.name())
-                                    .map_err(|_| PullError::FailedToExtactData)?;
-
-                                row_json["items"]
-                                    .as_array_mut()
-                                    .unwrap()
-                                    .push(json!({"field": column.name(), "value": value}));
-                            }
-                            records.push(Record(row_json));
-                        }
-
-                        let got = rows.len();
-
-                        if got < batch_size.to_u32() as usize {
-                            todo!("write pointer back to database");
-                            break;
-                        }
-
-                        first_run = false;
-                    }
-                }
-                PullBatchStartegy::LimitOffSet { field, offset } => {
-                    todo!("To support later")
-                }
-            }
-
-            Ok::<(), PullError>(())
-        });
-        task.await.unwrap();
+        let task = tokio::spawn(pull_task(strategy, table, batch_size, pg_pool, rules, tx));
+        let _ = task.await.unwrap();
         Ok(())
     }
     async fn sanitize(
@@ -221,14 +136,89 @@ impl ResourceConnection for PostgresConnection {
         todo!();
     }
 }
-enum HostError {
-    UnexpectedDomain,
+
+async fn pull_task(
+    strategy: PullBatchStrategy,
+    table: String,
+    batch_size: PullBatchSize,
+    pg_pool: Pool<Postgres>,
+    rules: Rules,
+    tx: mpsc::Sender<Vec<Record>>,
+) -> Result<(), PullError> {
+    let startegy = strategy;
+    match startegy {
+        PullBatchStrategy::Cursor { field, pointer } => {
+            let mut pointer = pointer;
+            let mut first_run = true;
+            loop {
+                let mut records: Vec<Record> = Vec::new();
+
+                let mut qb =
+                    QueryBuilder::<Postgres>::new(format!("SELECT * FROM {} WHERE 1=1", table));
+
+                if let Some(p) = &pointer
+                    && !(rules.force_pull_from_start && first_run)
+                {
+                    qb.push(format!("AND {} >", &field));
+                    qb.push_bind(p);
+                }
+
+                qb.push(format!(" ORDER BY {} LIMIT", &field));
+                qb.push_bind(batch_size.get().to_string());
+
+                let rows = qb.build().fetch_all(&pg_pool).await.unwrap();
+
+                if rows.is_empty() {
+                    break;
+                }
+
+                for row in rows.iter() {
+                    let new_ptr: String = row
+                        .try_get(&field.as_str())
+                        .map_err(|_| PullError::FailedToGetPointer)?;
+
+                    pointer = Some(new_ptr);
+
+                    let columns = row.columns();
+
+                    let mut row_json = json!({ "items": []});
+
+                    for column in columns.iter() {
+                        let value: String = row
+                            .try_get(column.name())
+                            .map_err(|_| PullError::FailedToExtactData)?;
+
+                        row_json["items"]
+                            .as_array_mut()
+                            .expect("row json to contains items")
+                            .push(json!({"field": column.name(), "value": value}));
+                    }
+                    records.push(Record(row_json));
+                }
+
+                let got = rows.len();
+
+                if got < batch_size.get() as usize {
+                    break;
+                }
+
+                let _ = &tx.send(records).await.unwrap();
+
+                first_run = false;
+            }
+        }
+        PullBatchStrategy::LimitOffSet { field, offset } => {
+            todo!("To support later")
+        }
+    }
+
+    Ok::<(), PullError>(())
 }
 
 pub struct Host(String);
 
 impl Host {
-    pub fn parse(host: String) -> Result<Self, HostError> {
+    pub fn new(host: String) -> Result<Self, HostError> {
         if !host.ends_with(".com") {
             return Err(HostError::UnexpectedDomain);
         }
@@ -243,16 +233,6 @@ impl AsRef<str> for Host {
     }
 }
 
-pub struct Port(u16);
-
-impl Port {
-    pub fn parse(port: u16) -> Self {
-        Port(port)
-    }
-}
-
-enum UsernameError {}
-
 pub struct Username(SecretString);
 
 impl Username {
@@ -266,7 +246,6 @@ impl AsRef<SecretString> for Username {
         &self.0
     }
 }
-enum PasswordError {}
 pub struct Password(SecretString);
 
 impl Password {
@@ -280,8 +259,6 @@ impl AsRef<SecretString> for Password {
         &self.0
     }
 }
-
-enum DatabaseNameError {}
 pub struct DatabaseName(String);
 
 impl DatabaseName {
@@ -299,4 +276,19 @@ impl AsRef<str> for DatabaseName {
 pub async fn get_postgres_pool(url: &str) -> Result<PgPool, sqlx::Error> {
     // Create a new PostgreSQL connection pool
     PgPoolOptions::new().max_connections(5).connect(url).await
+}
+
+mod errors {
+    pub enum DatabaseNameError {}
+    pub enum PasswordError {}
+
+    pub enum UsernameError {}
+
+    pub enum PullBatchSizeError {
+        CannotConvertBackToU32,
+    }
+
+    pub enum HostError {
+        UnexpectedDomain,
+    }
 }
