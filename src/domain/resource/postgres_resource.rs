@@ -220,9 +220,18 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
         Ok(())
     }
 
-    async fn push(&mut self, rx: mpsc::Receiver<Vec<SanitizedRecord>>) -> Result<(), PushError> {
-        todo!();
+    async fn push(
+        &mut self,
+        rules: Rules,
+        rx: mpsc::Receiver<Vec<SanitizedRecord>>,
+    ) -> Result<(), PushError> {
+        let table = self.table.clone();
+        let batch_size = self.pull_batch_size.clone();
+        let pg_pool = self.pool.clone();
 
+        let task = tokio::spawn(push_task(table, pg_pool, rules, rx));
+
+        task.await.map_err(|_| PushError::UnexpectedFailed)??;
         Ok(())
     }
 }
@@ -268,30 +277,25 @@ async fn pull_task(
                 }
 
                 for row in rows.iter() {
-                    let mut row_json = json!({ "items": [] });
-                    let items = row_json["items"]
-                        .as_array_mut()
-                        .expect("row json to contains items");
+                    let mut row_json = serde_json::Map::new();
 
                     for column in row.columns() {
-                        let value = decode_pg_value(row, column.ordinal(), column.type_info().name())
-                            .map_err(|_| PullError::FailedToExtractData)?;
+                        let value =
+                            decode_pg_value(row, column.ordinal(), column.type_info().name())
+                                .map_err(|_| PullError::FailedToExtractData)?;
 
                         if column.name() == field.as_str() {
                             pointer = Some(json_value_to_checkpoint(&value));
                         }
 
-                        items.push(json!({
-                            "field": column.name(),
-                            "value": value,
-                        }));
+                        row_json.insert(column.name().to_owned(), value);
                     }
 
                     if pointer.is_none() {
                         return Err(PullError::FailedToGetPointer);
                     }
 
-                    records.push(Record(row_json));
+                    records.push(Record(Value::Object(row_json)));
                 }
 
                 let _ = &tx.send(records).await.unwrap();
@@ -332,6 +336,111 @@ async fn sanitize_task(
     }
 
     Ok(())
+}
+
+async fn push_task(
+    table: String,
+    pg_pool: Pool<Postgres>,
+    rules: Rules,
+    mut rx: mpsc::Receiver<Vec<SanitizedRecord>>,
+) -> Result<(), PushError> {
+    let conflict_field = rules
+        .get_source_identifier()
+        .get_field_identifer_as_string();
+
+    while let Some(sanitized_records) = rx.recv().await {
+        if sanitized_records.is_empty() {
+            continue;
+        }
+
+        let columns: Vec<String> = sanitized_records[0]
+            .as_object()
+            .ok_or(PushError::UnexpectedFailed)?
+            .keys()
+            .cloned()
+            .collect();
+
+        if columns.is_empty() || !columns.iter().any(|c| c == &conflict_field) {
+            return Err(PushError::UnexpectedFailed);
+        }
+
+        let mut qb = QueryBuilder::<Postgres>::new("INSERT INTO ");
+        qb.push(&table);
+        qb.push(" (");
+        for (i, col) in columns.iter().enumerate() {
+            if i > 0 {
+                qb.push(", ");
+            }
+            qb.push(col.as_str());
+        }
+        qb.push(") ");
+
+        qb.push_values(&sanitized_records, |mut b, record| {
+            let obj = record.as_object();
+            for col in &columns {
+                let value = obj.and_then(|m| m.get(col)).unwrap_or(&Value::Null);
+                bind_json_value(&mut b, value);
+            }
+        });
+
+        let update_columns: Vec<&String> = columns
+            .iter()
+            .filter(|col| *col != &conflict_field)
+            .collect();
+
+        qb.push(" ON CONFLICT (");
+        qb.push(conflict_field.as_str());
+        qb.push(") ");
+
+        if update_columns.is_empty() {
+            qb.push("DO NOTHING");
+        } else {
+            qb.push("DO UPDATE SET ");
+            for (i, col) in update_columns.iter().enumerate() {
+                if i > 0 {
+                    qb.push(", ");
+                }
+                qb.push(col.as_str());
+                qb.push(" = EXCLUDED.");
+                qb.push(col.as_str());
+            }
+        }
+
+        qb.build()
+            .execute(&pg_pool)
+            .await
+            .map_err(|_| PushError::UnexpectedFailed)?;
+    }
+
+    Ok(())
+}
+
+fn bind_json_value(b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &str>, value: &Value) {
+    match value {
+        Value::Null => {
+            b.push("NULL");
+        }
+        Value::Bool(v) => {
+            b.push_bind(*v);
+        }
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                b.push_bind(i);
+            } else if let Some(u) = n.as_u64() {
+                b.push_bind(i64::try_from(u).unwrap_or(i64::MAX));
+            } else if let Some(f) = n.as_f64() {
+                b.push_bind(f);
+            } else {
+                b.push_bind(n.to_string());
+            }
+        }
+        Value::String(s) => {
+            b.push_bind(s.clone());
+        }
+        Value::Array(_) | Value::Object(_) => {
+            b.push_bind(sqlx::types::Json(value.clone()));
+        }
+    }
 }
 #[derive(Clone)]
 pub struct Host(String);
@@ -426,20 +535,28 @@ fn decode_pg_value(row: &PgRow, ordinal: usize, type_name: &str) -> Result<Value
         "FLOAT4" => Ok(json!(row.try_get::<f32, _>(ordinal)?)),
         "FLOAT8" => Ok(json!(row.try_get::<f64, _>(ordinal)?)),
         // Keep decimal precision — JSON numbers are not safe for NUMERIC.
-        "NUMERIC" => Ok(Value::String(row.try_get::<Decimal, _>(ordinal)?.to_string())),
+        "NUMERIC" => Ok(Value::String(
+            row.try_get::<Decimal, _>(ordinal)?.to_string(),
+        )),
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
             Ok(Value::String(row.try_get::<String, _>(ordinal)?))
         }
         "UUID" => Ok(Value::String(row.try_get::<Uuid, _>(ordinal)?.to_string())),
-        "DATE" => Ok(Value::String(row.try_get::<NaiveDate, _>(ordinal)?.to_string())),
-        "TIME" => Ok(Value::String(row.try_get::<NaiveTime, _>(ordinal)?.to_string())),
+        "DATE" => Ok(Value::String(
+            row.try_get::<NaiveDate, _>(ordinal)?.to_string(),
+        )),
+        "TIME" => Ok(Value::String(
+            row.try_get::<NaiveTime, _>(ordinal)?.to_string(),
+        )),
         "TIMESTAMP" => Ok(Value::String(
             row.try_get::<NaiveDateTime, _>(ordinal)?.to_string(),
         )),
         "TIMESTAMPTZ" => Ok(Value::String(
             row.try_get::<DateTime<Utc>, _>(ordinal)?.to_rfc3339(),
         )),
-        "BYTEA" => Ok(Value::String(BASE64.encode(row.try_get::<Vec<u8>, _>(ordinal)?))),
+        "BYTEA" => Ok(Value::String(
+            BASE64.encode(row.try_get::<Vec<u8>, _>(ordinal)?),
+        )),
         "JSON" | "JSONB" => row.try_get::<Value, _>(ordinal),
         // Last resort for uncommon/extension types that are text-compatible.
         _ => match row.try_get::<String, _>(ordinal) {
