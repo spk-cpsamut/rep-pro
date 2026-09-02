@@ -298,7 +298,7 @@ async fn pull_task(
                     records.push(Record(Value::Object(row_json)));
                 }
 
-                let _ = &tx.send(records).await.unwrap();
+                let _ = &tx.send(records).await.expect("to send records successfully");
 
                 let got = rows.len();
 
@@ -353,21 +353,18 @@ async fn push_task(
             continue;
         }
 
-        let columns: Vec<String> = sanitized_records[0]
+        let columns  = sanitized_records[0]
             .as_object()
-            .ok_or(PushError::UnexpectedFailed)?
-            .keys()
-            .cloned()
-            .collect();
+            .ok_or(PushError::UnexpectedFailed)?;
 
-        if columns.is_empty() || !columns.iter().any(|c| c == &conflict_field) {
+        if !columns.keys().any(|c| c == &conflict_field) {
             return Err(PushError::UnexpectedFailed);
         }
 
         let mut qb = QueryBuilder::<Postgres>::new("INSERT INTO ");
         qb.push(&table);
         qb.push(" (");
-        for (i, col) in columns.iter().enumerate() {
+        for (i, col) in columns.keys().enumerate() {
             if i > 0 {
                 qb.push(", ");
             }
@@ -377,14 +374,14 @@ async fn push_task(
 
         qb.push_values(&sanitized_records, |mut b, record| {
             let obj = record.as_object();
-            for col in &columns {
+            for col in columns.keys() {
                 let value = obj.and_then(|m| m.get(col)).unwrap_or(&Value::Null);
                 bind_json_value(&mut b, value);
             }
         });
 
         let update_columns: Vec<&String> = columns
-            .iter()
+            .keys()
             .filter(|col| *col != &conflict_field)
             .collect();
 
