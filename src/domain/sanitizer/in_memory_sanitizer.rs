@@ -46,7 +46,7 @@ impl InMemorySanitizer {
         records
             .into_iter()
             .map(|record| {
-                let mut merged = record.flatten_fields();
+                let mut merged = record.fields();
                 for col in rules.get_source_field() {
                     merged.insert(
                         col.get_field_name().to_owned(),

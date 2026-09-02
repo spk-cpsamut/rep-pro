@@ -31,7 +31,10 @@ pub trait Config<T: Config<T, S>, S: Sanitizer>: Clone {
     async fn sync_up_config(&self) -> Result<(), SyncUpConfigError>;
 }
 
-// we can replace Value with vec of field & value
+/// Flat JSON object: `{ "column": value, ... }`
+/// TODO: We will get rid of Value and introduce normalized properties
+/// e.g. Record { items: Vec<NormalizedProperties>} 
+/// Enum NormalizedProperties { String(string), I64(i64), Decimal(points, value) etc..}
 pub struct Record(Value);
 
 impl Deref for Record {
@@ -47,35 +50,14 @@ impl Record {
         let field = rules
             .get_source_identifier()
             .get_field_identifer_as_string();
-        self.get_field_value(&field)
-            .cloned()
-            .unwrap_or(Value::Null)
+        self.get_field_value(&field).cloned().unwrap_or(Value::Null)
     }
 
-    pub fn flatten_fields(&self) -> Map<String, Value> {
-        if let Some(items) = self.get("items").and_then(|v| v.as_array()) {
-            return items
-                .iter()
-                .filter_map(|item| {
-                    let field = item.get("field")?.as_str()?.to_owned();
-                    let value = item.get("value")?.clone();
-                    Some((field, value))
-                })
-                .collect();
-        }
-
+    pub fn fields(&self) -> Map<String, Value> {
         self.as_object().cloned().unwrap_or_default()
     }
 
     pub fn get_field_value(&self, field_name: &str) -> Option<&Value> {
-        if let Some(items) = self.get("items").and_then(|v| v.as_array()) {
-            return items.iter().find_map(|item| {
-                (item.get("field").and_then(|v| v.as_str()) == Some(field_name))
-                    .then(|| item.get("value"))
-                    .flatten()
-            });
-        }
-
         self.get(field_name)
     }
 }
@@ -197,19 +179,25 @@ pub trait ResourceConnection<T, S: Sanitizer> {
         rules: Rules,
         sanitizer: S,
     ) -> Result<(), SanitizeError>;
-    async fn push(&mut self, rx: mpsc::Receiver<Vec<SanitizedRecord>>) -> Result<(), PushError>;
+    async fn push(
+        &mut self,
+        rules: Rules,
+        rx: mpsc::Receiver<Vec<SanitizedRecord>>,
+    ) -> Result<(), PushError>;
 }
 
 mod errors {
     pub enum PullError {
         FailedToGetPointer,
         FailedToExtractData,
-        UnexpectedFailed
+        UnexpectedFailed,
     }
-    pub enum PushError {}
+    pub enum PushError {
+        UnexpectedFailed,
+    }
     pub enum SanitizeError {
         SanitizerFailed,
-        UnexpectedFailed
+        UnexpectedFailed,
     }
 
     pub enum ConnectionError {
