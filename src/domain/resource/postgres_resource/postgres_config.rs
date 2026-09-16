@@ -1,9 +1,8 @@
 use uuid::Uuid;
 use errors::*;
 
-use crate::domain::resource::postgres_resource::{
-    DatabaseName, Password, PullBatchStrategy, Username,
-};
+use crate::domain::resource::postgres_resource::{DatabaseName, Password, Username};
+
 #[derive(Clone)]
 pub struct PostgresConfig {
     pub resource_id: Uuid,
@@ -13,7 +12,6 @@ pub struct PostgresConfig {
     pub password: Password,
     pub database_name: DatabaseName,
     pub table: String,
-    pub pull_batch_strategy: PullBatchStrategy,
 }
 
 impl PostgresConfig {
@@ -25,7 +23,6 @@ impl PostgresConfig {
         password: Password,
         database_name: DatabaseName,
         table: String,
-        pull_batch_strategy: PullBatchStrategy,
     ) -> Self {
         Self {
             resource_id,
@@ -35,7 +32,6 @@ impl PostgresConfig {
             password,
             database_name,
             table,
-            pull_batch_strategy,
         }
     }
 }

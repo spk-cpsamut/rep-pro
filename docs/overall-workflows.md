@@ -69,7 +69,17 @@ sequenceDiagram
 
 ## Set mapping rules
 
-The client defines how a source table maps to a target table and the rules that govern the mapping. The service first creates the `resource_map` and then attaches the rules to it.
+The client defines how a source table maps to a target table and the rules that govern the mapping. The service first creates the `resource_map` (including an initial `pair_config`) and then attaches the rules to it.
+
+`pair_config` is per source→target pair. It stores the pull batch strategy and the checkpoint pointer (or offset). The pointer starts as `null` when the map is created. After a successful run, `sync_up_config` writes the updated strategy and pointer back to `resource_maps.pair_config` so the next run resumes from that checkpoint.
+
+```json
+{
+  "pull_batch_strategy": "cursor",
+  "pull_batch_field": "id",
+  "pull_batch_checkpoint": null
+}
+```
 
 ```mermaid
 sequenceDiagram
@@ -84,8 +94,8 @@ sequenceDiagram
     participant RS as rules
     participant RSM as resources_maps
     end
-    C  ->> S:   1. setMappingRules(source{resource_id, table}, target{resource_id, table}, rules[])
-    S  ->> RSM: 2. insert resource_map(source{resource_id, table}, target{resource_id, table})
+    C  ->> S:   1. setMappingRules(source{resource_id, table}, target{resource_id, table}, rules[], pair_config)
+    S  ->> RSM: 2. insert resource_map(source, target, pair_config with null pointer)
     RSM -->> S: 3. resource_map_id
     S  ->> RS:  4. insertRules(resource_map_id, rules[])
 ```
@@ -107,6 +117,7 @@ erDiagram
         UUID id PK
         UUID resource_source FK
         UUID resource_target FK
+        JSONB pair_config
         VARCHAR255 table_source
         VARCHAR255 table_target
     }
@@ -131,4 +142,7 @@ erDiagram
     rule         ||--o{ value_mapping : produces
 ```
 
-> **Note:** `value_mapping` should enforce a uniqueness constraint on `(rule_id, source_value)` so that the consistent mapping guarantee holds at the storage layer (one source value per rule maps to exactly one target value).
+> **Notes:**
+>
+> - `value_mapping` should enforce a uniqueness constraint on `(rule_id, source_value)` so that the consistent mapping guarantee holds at the storage layer (one source value per rule maps to exactly one target value).
+> - `resource_map.pair_config` is the pull strategy plus pointer for that pair. A successful sanitization run updates it via `sync_up_config`; it is not stored on the resource itself.

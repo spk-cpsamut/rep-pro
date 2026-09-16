@@ -7,7 +7,9 @@ mod postgres_config;
 use postgres_config::PostgresConfig;
 
 mod pull_batch;
-use pull_batch::{PullBatchSize, PullBatchStrategy};
+use pull_batch::PullBatchSize;
+
+pub use crate::domain::resource_map::PullBatchStrategy;
 
 mod postgres_tasks;
 use postgres_tasks::postgres_pull_task::pull_task;
@@ -17,7 +19,7 @@ mod postgres_connection;
 use crate::domain::{
     resource::{
         Config, ConnectionError, PullError, PushError, Record, ResourceConnection, Rules,
-        SanitizeError, SanitizedRecord, errors::SyncUpConfigError,
+        SanitizeError, SanitizedRecord,
         postgres_resource::postgres_tasks::postgres_push_task::push_task,
     },
     sanitizer::{Sanitizer, in_memory_sanitizer::InMemorySanitizer},
@@ -50,25 +52,20 @@ impl Config<PostgresConfig, InMemorySanitizer> for PostgresConfig {
             pool,
             pull_batch_size: PullBatchSize::new(100000),
             sanitize_batch_size: PullBatchSize::new(100000),
-            pull_batch_strategy: self.pull_batch_strategy.clone(),
             table: self.table.clone(),
             config: self.clone(),
         })
-    }
-
-    async fn sync_up_config(&self) -> Result<(), SyncUpConfigError> {
-        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnection {
     async fn pull(
-        &mut self,
+        &self,
         tx: mpsc::Sender<Vec<Record>>,
         rules: Rules,
-    ) -> Result<PostgresConfig, PullError> {
-        let strategy = self.pull_batch_strategy.clone();
+        strategy: PullBatchStrategy,
+    ) -> Result<PullBatchStrategy, PullError> {
         let table = self.table.clone();
         let batch_size = self.pull_batch_size.clone();
         let pg_pool = self.pool.clone();
@@ -82,12 +79,10 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
             rules,
             tx,
         ));
-        let _ = task.await.map_err(|_| PullError::UnexpectedFailed)?;
-
-        Ok(self.config.clone())
+        task.await.map_err(|_| PullError::UnexpectedFailed)?
     }
     async fn sanitize(
-        &mut self,
+        &self,
         tx: mpsc::Sender<Vec<SanitizedRecord>>,
         rx: mpsc::Receiver<Vec<Record>>,
         rules: Rules,
@@ -102,7 +97,7 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
     }
 
     async fn push(
-        &mut self,
+        &self,
         rules: Rules,
         rx: mpsc::Receiver<Vec<SanitizedRecord>>,
     ) -> Result<(), PushError> {

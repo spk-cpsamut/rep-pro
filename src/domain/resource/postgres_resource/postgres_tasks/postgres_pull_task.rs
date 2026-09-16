@@ -7,7 +7,14 @@ use serde_json::{Value, json};
 use sqlx::{Column, Pool, Postgres, QueryBuilder, Row, TypeInfo, ValueRef, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::domain::resource::{Record, Rules, errors::PullError, postgres_resource::pull_batch::{PullBatchSize, PullBatchStrategy}};
+use crate::domain::{
+    resource::{
+        Record, Rules,
+        errors::PullError,
+        postgres_resource::pull_batch::PullBatchSize,
+    },
+    resource_map::PullBatchStrategy,
+};
 
 pub async fn pull_task(
     resource_id: Uuid,

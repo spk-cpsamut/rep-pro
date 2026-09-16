@@ -1,13 +1,14 @@
 use std::{marker::PhantomData, ops::Deref};
 
-use errors::*;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::domain::sanitizer::Sanitizer;
+use crate::domain::{resource_map::PullBatchStrategy, sanitizer::Sanitizer};
 
 pub mod postgres_resource;
+
+pub use errors::{ConnectionError, PullError, PushError, SanitizeError, SyncUpConfigError};
 
 pub struct Resource<T, S>
 where
@@ -21,14 +22,43 @@ where
     _marker: PhantomData<S>,
 }
 
+impl<T, S> Resource<T, S>
+where
+    T: Config<T, S>,
+    S: Sanitizer,
+{
+    pub fn new(id: Uuid, allow_upstream: bool, allow_downstream: bool, config: T) -> Self {
+        Self {
+            id,
+            allow_upstream,
+            allow_downstream,
+            config,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn allow_upstream(&self) -> bool {
+        self.allow_upstream
+    }
+
+    pub fn allow_downstream(&self) -> bool {
+        self.allow_downstream
+    }
+
+    pub async fn connect(&mut self) -> Result<T::Connection, ConnectionError>
+    where
+        T::Connection: ResourceConnection<T, S>,
+    {
+        self.config.connect().await
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Config<T: Config<T, S>, S: Sanitizer>: Clone {
     type Connection;
     async fn connect(&mut self) -> Result<Self::Connection, ConnectionError>
     where
         Self::Connection: ResourceConnection<T, S>;
-
-    async fn sync_up_config(&self) -> Result<(), SyncUpConfigError>;
 }
 
 /// Flat JSON object: `{ "column": value, ... }`
@@ -171,16 +201,21 @@ impl Rules {
 
 #[async_trait::async_trait]
 pub trait ResourceConnection<T, S: Sanitizer> {
-    async fn pull(&mut self, tx: mpsc::Sender<Vec<Record>>, rules: Rules) -> Result<T, PullError>;
+    async fn pull(
+        &self,
+        tx: mpsc::Sender<Vec<Record>>,
+        rules: Rules,
+        strategy: PullBatchStrategy,
+    ) -> Result<PullBatchStrategy, PullError>;
     async fn sanitize(
-        &mut self,
+        &self,
         tx: mpsc::Sender<Vec<SanitizedRecord>>,
         rx: mpsc::Receiver<Vec<Record>>,
         rules: Rules,
         sanitizer: S,
     ) -> Result<(), SanitizeError>;
     async fn push(
-        &mut self,
+        &self,
         rules: Rules,
         rx: mpsc::Receiver<Vec<SanitizedRecord>>,
     ) -> Result<(), PushError>;
@@ -204,5 +239,8 @@ mod errors {
         FailedToConnect,
     }
 
-    pub enum SyncUpConfigError {}
+    pub enum SyncUpConfigError {
+        PersistFailed,
+        MapNotFound,
+    }
 }
