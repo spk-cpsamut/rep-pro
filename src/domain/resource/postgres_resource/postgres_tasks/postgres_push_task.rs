@@ -14,6 +14,10 @@ pub async fn push_task(
         .get_source_identifier()
         .get_field_identifer_as_string();
 
+    if !is_safe_ident(&table) || !is_safe_ident(&conflict_field) {
+        return Err(PushError::UnexpectedFailed);
+    }
+
     while let Some(sanitized_records) = rx.recv().await {
         if sanitized_records.is_empty() {
             continue;
@@ -76,6 +80,12 @@ pub async fn push_task(
     }
 
     Ok(())
+}
+
+fn is_safe_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn bind_json_value(b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &str>, value: &Value) {

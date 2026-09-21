@@ -20,10 +20,12 @@ where
     store: Store,
 }
 
+#[derive(Debug)]
 pub enum OrchestratorError {
     DownstreamNotAllowed,
     UpstreamNotAllowed,
-    ConnectionFailed,
+    SourceConnectionFailed,
+    TargetConnectionFailed,
     PullFailed,
     SanitizeFailed,
     PushFailed,
@@ -72,12 +74,12 @@ where
             .source
             .connect()
             .await
-            .map_err(|_| OrchestratorError::ConnectionFailed)?;
+            .map_err(|_| OrchestratorError::SourceConnectionFailed)?;
         let target_conn = self
             .target
             .connect()
             .await
-            .map_err(|_| OrchestratorError::ConnectionFailed)?;
+            .map_err(|_| OrchestratorError::TargetConnectionFailed)?;
 
         let (raw_tx, raw_rx) = mpsc::channel::<Vec<Record>>(8);
         let (clean_tx, clean_rx) = mpsc::channel::<Vec<SanitizedRecord>>(8);
@@ -105,11 +107,8 @@ where
             },
         )?;
 
-        let mut updated_pair_config = self.resource_map.pair_config().clone();
-        updated_pair_config.set_pull_strategy(updated_strategy);
-
         self.resource_map
-            .sync_up_config(&self.store, updated_pair_config.clone())
+            .sync_up_config(&self.store, PairConfig::new(updated_strategy))
             .await
             .map_err(|_| OrchestratorError::SyncUpConfigFailed)?;
 

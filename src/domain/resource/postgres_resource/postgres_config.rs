@@ -41,10 +41,6 @@ pub struct Host(String);
 
 impl Host {
     pub fn new(host: String) -> Result<Self, HostError> {
-        if !host.ends_with(".com") {
-            return Err(HostError::UnexpectedDomain);
-        }
-
         Ok(Host(host))
     }
 }

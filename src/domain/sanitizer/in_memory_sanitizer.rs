@@ -46,14 +46,18 @@ impl InMemorySanitizer {
         records
             .into_iter()
             .map(|record| {
-                let mut merged = record.fields();
+                let mut allowed = serde_json::Map::new();
+                let identifier = rules
+                    .get_source_identifier()
+                    .get_field_identifer_as_string();
+                allowed.insert(identifier, record.get_identifier_val(rules));
                 for col in rules.get_source_field() {
-                    merged.insert(
+                    allowed.insert(
                         col.get_field_name().to_owned(),
                         self.get_mock_data(rules, col, &record),
                     );
                 }
-                SanitizedRecord::new(Value::Object(merged))
+                SanitizedRecord::new(Value::Object(allowed))
             })
             .collect()
     }

@@ -1,6 +1,5 @@
 use secrecy::{ExposeSecret, SecretString};
-use serde_json::{Value, json};
-use sqlx::{PgPool, Pool, Postgres, QueryBuilder, postgres::PgPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::mpsc;
 
 mod postgres_config;
@@ -26,9 +25,6 @@ use crate::domain::{
 };
 use postgres_connection::PostgresConnection;
 
-use std::u32;
-
-use constants::*;
 use errors::*;
 
 #[async_trait::async_trait]
@@ -66,20 +62,16 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
         rules: Rules,
         strategy: PullBatchStrategy,
     ) -> Result<PullBatchStrategy, PullError> {
-        let table = self.table.clone();
-        let batch_size = self.pull_batch_size.clone();
-        let pg_pool = self.pool.clone();
-
-        let task = tokio::spawn(pull_task(
+        pull_task(
             self.resource_id,
             strategy,
-            table,
-            batch_size,
-            pg_pool,
+            self.table.clone(),
+            self.pull_batch_size.clone(),
+            self.pool.clone(),
             rules,
             tx,
-        ));
-        task.await.map_err(|_| PullError::UnexpectedFailed)?
+        )
+        .await
     }
     async fn sanitize(
         &self,
@@ -89,11 +81,7 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
         sanitizer: InMemorySanitizer,
     ) -> Result<(), SanitizeError> {
         let sanitizer: Box<dyn Sanitizer> = Box::new(sanitizer);
-        let task = tokio::spawn(sanitize_task(tx, rx, rules, sanitizer));
-
-        let _ = task.await.map_err(|_| SanitizeError::UnexpectedFailed)?;
-
-        Ok(())
+        sanitize_task(tx, rx, rules, sanitizer).await
     }
 
     async fn push(
@@ -101,14 +89,7 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
         rules: Rules,
         rx: mpsc::Receiver<Vec<SanitizedRecord>>,
     ) -> Result<(), PushError> {
-        let table = self.table.clone();
-        let batch_size = self.pull_batch_size.clone();
-        let pg_pool = self.pool.clone();
-
-        let task = tokio::spawn(push_task(table, pg_pool, rules, rx));
-
-        task.await.map_err(|_| PushError::UnexpectedFailed)??;
-        Ok(())
+        push_task(self.table.clone(), self.pool.clone(), rules, rx).await
     }
 }
 #[derive(Clone)]
@@ -169,9 +150,4 @@ mod errors {
     pub enum PullBatchSizeError {
         CannotConvertBackToU32,
     }
-}
-
-mod constants {
-    pub const CURSOR: &'static str = "cursor";
-    pub const LIMIT_OFFSET: &'static str = "LimitOffSet";
 }

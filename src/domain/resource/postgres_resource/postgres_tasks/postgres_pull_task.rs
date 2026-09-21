@@ -17,7 +17,7 @@ use crate::domain::{
 };
 
 pub async fn pull_task(
-    resource_id: Uuid,
+    _resource_id: Uuid,
     strategy: PullBatchStrategy,
     table: String,
     batch_size: PullBatchSize,
@@ -25,9 +25,17 @@ pub async fn pull_task(
     rules: Rules,
     tx: mpsc::Sender<Vec<Record>>,
 ) -> Result<PullBatchStrategy, PullError> {
+    if !is_safe_ident(&table) {
+        return Err(PullError::FailedToExtractData);
+    }
+
     let mut updated_strategy = strategy.clone();
     match strategy {
         PullBatchStrategy::Cursor { field, pointer } => {
+            if !is_safe_ident(&field) {
+                return Err(PullError::FailedToExtractData);
+            }
+
             let mut pointer = pointer;
             let mut first_run = true;
             loop {
@@ -39,7 +47,7 @@ pub async fn pull_task(
                 if let Some(p) = &pointer
                     && !(rules.force_pull_from_start && first_run)
                 {
-                    qb.push(format!("AND {} >", &field));
+                    qb.push(format!(" AND {} >", &field));
                     qb.push_bind(p);
                 }
 
@@ -78,10 +86,9 @@ pub async fn pull_task(
                     records.push(Record(Value::Object(row_json)));
                 }
 
-                let _ = &tx
-                    .send(records)
+                tx.send(records)
                     .await
-                    .expect("to send records successfully");
+                    .map_err(|_| PullError::UnexpectedFailed)?;
 
                 let got = rows.len();
 
@@ -93,8 +100,8 @@ pub async fn pull_task(
             }
             updated_strategy = PullBatchStrategy::Cursor { field, pointer }
         }
-        PullBatchStrategy::LimitOffSet { field, offset } => {
-            todo!("To support later")
+        PullBatchStrategy::LimitOffSet { .. } => {
+            return Err(PullError::UnexpectedFailed);
         }
     }
 
@@ -144,6 +151,12 @@ fn decode_pg_value(row: &PgRow, ordinal: usize, type_name: &str) -> Result<Value
             Err(e) => Err(e),
         },
     }
+}
+
+fn is_safe_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn json_value_to_checkpoint(value: &Value) -> String {
