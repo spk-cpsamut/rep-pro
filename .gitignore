@@ -1,2 +1,4 @@
 /target
 .env
+ui/node_modules
+ui/dist

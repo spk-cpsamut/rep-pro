@@ -1,2 +1,2 @@
-mod domain;
+pub mod domain;
 mod infrastructure;
