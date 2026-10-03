@@ -1,5 +1,3 @@
-mod api;
-
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -11,12 +9,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(5)
         .connect(&database_url)
         .await?;
-    let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let app = api::router(api::AppState {
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Ok(profile) = std::env::var("AWS_PROFILE_NAME") {
+        loader = loader.profile_name(profile);
+    }
+    let sdk_config = loader.load().await;
+    let app = rep_pro::domain::router(rep_pro::AppState::new(
         pool,
-        kms: aws_sdk_kms::Client::new(&sdk_config),
+        aws_sdk_kms::Client::new(&sdk_config),
         kms_key_id,
-    });
+    ));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
     Ok(())

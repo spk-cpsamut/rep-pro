@@ -1,5 +1,5 @@
-use uuid::Uuid;
 use errors::*;
+use uuid::Uuid;
 
 use crate::domain::resource::postgres_resource::{DatabaseName, Password, Username};
 

@@ -75,7 +75,9 @@ impl From<&PairConfig> for PairConfigJson {
                 (CURSOR.to_owned(), field.clone(), pointer.clone())
             }
             PullBatchStrategy::LimitOffSet { field, offset } => {
-                let checkpoint = offset.as_ref().map(|sql_offset| sql_offset.get().to_string());
+                let checkpoint = offset
+                    .as_ref()
+                    .map(|sql_offset| sql_offset.get().to_string());
                 (LIMIT_OFFSET.to_owned(), field.clone(), checkpoint)
             }
         };

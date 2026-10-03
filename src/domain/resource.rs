@@ -8,6 +8,11 @@ use crate::domain::{resource_map::PullBatchStrategy, sanitizer::Sanitizer};
 
 pub mod postgres_resource;
 
+pub mod dao;
+mod handler_inner;
+pub(crate) mod handlers;
+mod models;
+
 pub use errors::{ConnectionError, PullError, PushError, SanitizeError, SyncUpConfigError};
 
 pub struct Resource<T, S>
@@ -63,7 +68,7 @@ pub trait Config<T: Config<T, S>, S: Sanitizer>: Clone {
 
 /// Flat JSON object: `{ "column": value, ... }`
 /// TODO: We will get rid of Value and introduce normalized properties
-/// e.g. Record { items: Vec<NormalizedProperties>} 
+/// e.g. Record { items: Vec<NormalizedProperties>}
 /// Enum NormalizedProperties { String(string), I64(i64), Decimal(points, value) etc..}
 pub struct Record(Value);
 

@@ -1,18 +1,14 @@
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use serde_json::{Value, json};
 use sqlx::{Column, Pool, Postgres, QueryBuilder, Row, TypeInfo, ValueRef, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::domain::{
-    resource::{
-        Record, Rules,
-        errors::PullError,
-        postgres_resource::pull_batch::PullBatchSize,
-    },
+    resource::{Record, Rules, errors::PullError, postgres_resource::pull_batch::PullBatchSize},
     resource_map::PullBatchStrategy,
 };
 
@@ -168,4 +164,3 @@ fn json_value_to_checkpoint(value: &Value) -> String {
         other => other.to_string(),
     }
 }
-

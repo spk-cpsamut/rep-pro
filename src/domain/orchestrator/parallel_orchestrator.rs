@@ -54,11 +54,7 @@ where
         }
     }
 
-    pub async fn run(
-        &mut self,
-        rules: Rules,
-        sanitizer: S1,
-    ) -> Result<(), OrchestratorError>
+    pub async fn run(&mut self, rules: Rules, sanitizer: S1) -> Result<(), OrchestratorError>
     where
         T1::Connection: ResourceConnection<T1, S1>,
         T2::Connection: ResourceConnection<T2, S2>,
@@ -84,7 +80,11 @@ where
         let (raw_tx, raw_rx) = mpsc::channel::<Vec<Record>>(8);
         let (clean_tx, clean_rx) = mpsc::channel::<Vec<SanitizedRecord>>(8);
 
-        let strategy = self.resource_map.pair_config().pull_batch_strategy().clone();
+        let strategy = self
+            .resource_map
+            .pair_config()
+            .pull_batch_strategy()
+            .clone();
 
         let (updated_strategy, _, _) = tokio::try_join!(
             async {

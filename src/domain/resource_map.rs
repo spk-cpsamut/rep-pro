@@ -1,5 +1,10 @@
 pub mod pair_config;
 
+pub mod dao;
+mod handler_inner;
+pub(crate) mod handlers;
+mod models;
+
 pub use pair_config::{PairConfig, PullBatchStrategy, SqlOffset};
 
 use uuid::Uuid;
