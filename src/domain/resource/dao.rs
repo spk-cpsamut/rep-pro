@@ -14,6 +14,8 @@ pub(crate) trait Dao: Send + Sync {
         allow_upstream: bool,
         allow_downstream: bool,
     ) -> Result<Uuid, sqlx::Error>;
+
+    async fn load_ciphertext(&self, id: Uuid) -> Result<Option<ResourceCiphertext>, sqlx::Error>;
 }
 
 #[derive(Clone)]
@@ -56,6 +58,20 @@ impl Dao for ResourceDao {
         .fetch_one(&self.pool)
         .await
     }
+
+    async fn load_ciphertext(&self, id: Uuid) -> Result<Option<ResourceCiphertext>, sqlx::Error> {
+        sqlx::query_as("SELECT username, password, config FROM resources WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct ResourceCiphertext {
+    pub username: Vec<u8>,
+    pub password: Vec<u8>,
+    pub config: Vec<u8>,
 }
 
 #[derive(sqlx::FromRow)]

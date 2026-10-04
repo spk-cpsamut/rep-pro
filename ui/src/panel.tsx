@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   NAMING_CONVENTIONS,
   PULL_STRATEGIES,
@@ -6,8 +6,10 @@ import {
   createResource,
   createResourceMap,
   emptyRule,
+  listColumns,
   rememberLabel,
   resourceTitle,
+  type ColumnMeta,
   type FieldInput,
   type NamingConvention,
   type PullStrategy,
@@ -43,10 +45,15 @@ export function Panel({
   onLinked,
   onError,
 }: PanelProps) {
+  const [tab, setTab] = useState<"resource" | "link">("resource");
   const sources = resources.filter((resource) => resource.allow_downstream);
   const targets = resources.filter((resource) => resource.allow_upstream);
   const selected = resources.find((resource) => resource.id === selectedResourceId);
   const selectedMap = maps.find((map) => map.resource_map_id === selectedMapId);
+
+  useEffect(() => {
+    if (selectedMapId) setTab("link");
+  }, [selectedMapId]);
 
   return (
     <aside className="panel">
@@ -54,7 +61,9 @@ export function Panel({
         <p className="eyebrow">rep-pro</p>
         <h1>Resources</h1>
         <p className="lede">
-          Register a database, then draw a link from a source table to a target table.
+          {tab === "resource"
+            ? "Register a database so it can appear in the scene."
+            : "Draw a link from a source table to a target table."}
         </p>
       </header>
 
@@ -64,48 +73,87 @@ export function Panel({
         <li><i className="swatch sand" /> Both</li>
       </ul>
 
+      <div className="tabs" role="tablist" aria-label="Resource panel">
+        <button
+          type="button"
+          role="tab"
+          id="tab-resource"
+          aria-selected={tab === "resource"}
+          aria-controls="panel-resource"
+          className={tab === "resource" ? "active" : undefined}
+          onClick={() => setTab("resource")}
+        >
+          Resource
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-link"
+          aria-selected={tab === "link"}
+          aria-controls="panel-link"
+          className={tab === "link" ? "active" : undefined}
+          onClick={() => setTab("link")}
+        >
+          Link
+        </button>
+      </div>
+
       {error ? <p className="banner error">{error}</p> : null}
 
-      <CreateForm
-        onCreated={onCreated}
-        onError={onError}
-      />
-      <LinkForm
-        sources={sources}
-        targets={targets}
-        labels={labels}
-        selected={selected}
-        onLinked={onLinked}
-        onError={onError}
-      />
+      <div
+        role="tabpanel"
+        id="panel-resource"
+        aria-labelledby="tab-resource"
+        hidden={tab !== "resource"}
+      >
+        <CreateForm
+          onCreated={onCreated}
+          onError={onError}
+        />
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-link"
+        aria-labelledby="tab-link"
+        hidden={tab !== "link"}
+      >
+        <LinkForm
+          sources={sources}
+          targets={targets}
+          labels={labels}
+          selected={selected}
+          onLinked={onLinked}
+          onError={onError}
+        />
 
-      <section className="block">
-        <h2>Links</h2>
-        {maps.length === 0 ? (
-          <p className="hint">No links yet. A new link shows up as a curve between two resources.</p>
-        ) : (
-          <ul className="link-list">
-            {maps.map((map) => (
-              <li key={map.resource_map_id}>
-                <button
-                  type="button"
-                  className={map.resource_map_id === selectedMapId ? "link-row selected" : "link-row"}
-                  onClick={() => onSelectMap(map.resource_map_id)}
-                >
-                  <span>
-                    {resourceTitle(map.resource_source, labels)}.{map.table_source}
-                  </span>
-                  <span className="arrow">to</span>
-                  <span>
-                    {resourceTitle(map.resource_target, labels)}.{map.table_target}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {selectedMap ? <LinkDetail map={selectedMap} /> : null}
-      </section>
+        <section className="block">
+          <h2>Links</h2>
+          {maps.length === 0 ? (
+            <p className="hint">No links yet. A new link shows up as a curve between two resources.</p>
+          ) : (
+            <ul className="link-list">
+              {maps.map((map) => (
+                <li key={map.resource_map_id}>
+                  <button
+                    type="button"
+                    className={map.resource_map_id === selectedMapId ? "link-row selected" : "link-row"}
+                    onClick={() => onSelectMap(map.resource_map_id)}
+                  >
+                    <span>
+                      {resourceTitle(map.resource_source, labels)}.{map.table_source}
+                    </span>
+                    <span className="arrow">to</span>
+                    <span>
+                      {resourceTitle(map.resource_target, labels)}.{map.table_target}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {selectedMap ? <LinkDetail map={selectedMap} /> : null}
+        </section>
+      </div>
     </aside>
   );
 }
@@ -255,16 +303,65 @@ function LinkForm({
   const [strategy, setStrategy] = useState<PullStrategy>("cursor");
   const [pullField, setPullField] = useState("id");
   const [rules, setRules] = useState<RuleInput[]>([emptyRule()]);
+  const [columns, setColumns] = useState<ColumnMeta[]>([]);
+  const [columnHint, setColumnHint] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const columnMessage =
+    columnHint ??
+    (sourceId && tableSource && !isSafeTable(tableSource)
+      ? "Table name must be a plain identifier."
+      : null);
+
+  useEffect(() => {
+    if (!sourceId || !isSafeTable(tableSource)) return;
+
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      setColumnHint("Loading columns…");
+      void listColumns(sourceId, tableSource)
+        .then((next) => {
+          if (cancelled) return;
+          const names = new Set(next.map((column) => column.column_name));
+          setColumns(next);
+          setColumnHint(next.length === 0 ? "No columns found for this table." : null);
+          setPullField((current) => (names.has(current) ? current : ""));
+          setRules((current) =>
+            current.map((rule) => ({
+              ...rule,
+              source_identifier: names.has(rule.source_identifier) ? rule.source_identifier : "",
+              fields: rule.fields.map((field) => ({
+                ...field,
+                field_name: names.has(field.field_name) ? field.field_name : "",
+              })),
+            })),
+          );
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setColumns([]);
+          setColumnHint(err instanceof Error ? err.message : "Could not load columns");
+        });
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [sourceId, tableSource]);
 
   function assignSelection(role: "source" | "target") {
     if (!selected) return;
     const knownTable = labels[selected.id]?.table ?? "";
     if (role === "source") {
       if (!selected.allow_downstream) return;
+      const nextTable = tableSource || knownTable;
+      if (sourceId !== selected.id || tableSource !== nextTable) {
+        setColumns([]);
+        setColumnHint(null);
+      }
       setSourceId(selected.id);
-      setTableSource((current) => current || knownTable);
+      setTableSource(nextTable);
       return;
     }
     if (!selected.allow_upstream) return;
@@ -324,7 +421,15 @@ function LinkForm({
       </div>
       <label>
         Source
-        <select value={sourceId} onChange={(event) => setSourceId(event.target.value)} required>
+        <select
+          value={sourceId}
+          onChange={(event) => {
+            setSourceId(event.target.value);
+            setColumns([]);
+            setColumnHint(null);
+          }}
+          required
+        >
           <option value="">Choose a source</option>
           {sources.map((resource) => (
             <option key={resource.id} value={resource.id}>
@@ -347,13 +452,22 @@ function LinkForm({
       <div className="split">
         <label>
           Source table
-          <input value={tableSource} onChange={(event) => setTableSource(event.target.value)} required />
+          <input
+            value={tableSource}
+            onChange={(event) => {
+              setTableSource(event.target.value);
+              setColumns([]);
+              setColumnHint(null);
+            }}
+            required
+          />
         </label>
         <label>
           Target table
           <input value={tableTarget} onChange={(event) => setTableTarget(event.target.value)} required />
         </label>
       </div>
+      {columnMessage ? <p className="hint">{columnMessage}</p> : null}
       <div className="split">
         <label>
           Pull strategy
@@ -370,7 +484,11 @@ function LinkForm({
         </label>
         <label>
           Pull field
-          <input value={pullField} onChange={(event) => setPullField(event.target.value)} required />
+          <ColumnSelect
+            value={pullField}
+            columns={columns}
+            onChange={setPullField}
+          />
         </label>
       </div>
 
@@ -380,6 +498,7 @@ function LinkForm({
             key={index}
             index={index}
             rule={rule}
+            columns={columns}
             canRemove={rules.length > 1}
             onChange={(next) =>
               setRules((current) => current.map((item, itemIndex) => (itemIndex === index ? next : item)))
@@ -396,7 +515,7 @@ function LinkForm({
         </button>
       </div>
 
-      <button type="submit" disabled={pending}>
+      <button type="submit" disabled={pending || columns.length === 0}>
         {pending ? "Linking…" : "Link resources"}
       </button>
       {notice ? <p className="banner ok">{notice}</p> : null}
@@ -407,12 +526,14 @@ function LinkForm({
 function RuleEditor({
   index,
   rule,
+  columns,
   canRemove,
   onChange,
   onRemove,
 }: {
   index: number;
   rule: RuleInput;
+  columns: ColumnMeta[];
   canRemove: boolean;
   onChange: (rule: RuleInput) => void;
   onRemove: () => void;
@@ -429,10 +550,10 @@ function RuleEditor({
       <legend>Rule {index + 1}</legend>
       <label>
         Source identifier
-        <input
+        <ColumnSelect
           value={rule.source_identifier}
-          onChange={(event) => onChange({ ...rule, source_identifier: event.target.value })}
-          required
+          columns={columns}
+          onChange={(source_identifier) => onChange({ ...rule, source_identifier })}
         />
       </label>
       <label className="check">
@@ -487,12 +608,10 @@ function RuleEditor({
         <div className="split field-row" key={fieldIndex}>
           <label>
             Field
-            <input
+            <ColumnSelect
               value={field.field_name}
-              onChange={(event) =>
-                updateField(fieldIndex, { ...field, field_name: event.target.value })
-              }
-              required
+              columns={columns}
+              onChange={(field_name) => updateField(fieldIndex, { ...field, field_name })}
             />
           </label>
           <label>
@@ -547,6 +666,38 @@ function RuleEditor({
       </div>
     </fieldset>
   );
+}
+
+function ColumnSelect({
+  value,
+  columns,
+  onChange,
+}: {
+  value: string;
+  columns: ColumnMeta[];
+  onChange: (value: string) => void;
+}) {
+  const known = columns.some((column) => column.column_name === value);
+  return (
+    <select
+      value={known ? value : ""}
+      onChange={(event) => onChange(event.target.value)}
+      required
+      disabled={columns.length === 0}
+    >
+      <option value="">Choose a column</option>
+      {columns.map((column) => (
+        <option key={column.column_name} value={column.column_name}>
+          {column.column_name} · {column.data_type}
+          {column.is_primary_key ? " · primary key" : ""}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function isSafeTable(name: string): boolean {
+  return name.length > 0 && name.length <= 255 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
 function LinkDetail({ map }: { map: ResourceMapSummary }) {

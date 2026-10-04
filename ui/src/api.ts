@@ -76,6 +76,12 @@ export type StoredRule = {
   source_sanitize_fields: StoredField[];
 };
 
+export type ColumnMeta = {
+  column_name: string;
+  data_type: string;
+  is_primary_key: boolean;
+};
+
 export type ResourceMapSummary = {
   resource_map_id: string;
   resource_source: string;
@@ -135,6 +141,15 @@ export function emptyRule(): RuleInput {
     source_identifier: "id",
     fields: [{ field_name: "", sanitize_type: "name" }],
   };
+}
+
+export async function listColumns(
+  resourceId: string,
+  table: string,
+  schema = "public",
+): Promise<ColumnMeta[]> {
+  const params = new URLSearchParams({ schema, table });
+  return request<ColumnMeta[]>(`/resources/${resourceId}/columns?${params.toString()}`);
 }
 
 export async function listResources(): Promise<ResourceSummary[]> {

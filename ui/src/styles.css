@@ -103,6 +103,33 @@ select {
 .swatch.tide { background: var(--tide); }
 .swatch.sand { background: var(--sand); }
 
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 18px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #1a2028;
+}
+
+.tabs button {
+  background: transparent;
+  color: var(--muted);
+}
+
+.tabs button.active {
+  background: var(--copper);
+  color: #24160d;
+}
+
+[role="tabpanel"] > .block:first-child {
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .block {
   display: grid;
   gap: 10px;

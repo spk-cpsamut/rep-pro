@@ -26,6 +26,13 @@ pub(crate) struct CreatedResource {
     pub resource_id: Uuid,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct ColumnMeta {
+    pub column_name: String,
+    pub data_type: String,
+    pub is_primary_key: bool,
+}
+
 #[derive(Serialize)]
 pub(crate) struct ResourceSummary {
     pub id: Uuid,
