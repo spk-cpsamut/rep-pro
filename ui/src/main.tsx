@@ -64,6 +64,11 @@ function App() {
         onPreview={(mapId, preview) =>
           setPreviews((current) => ({ ...current, [mapId]: preview }))
         }
+        onRan={() => {
+          reload().catch((err: unknown) => {
+            setError(err instanceof Error ? err.message : "Could not load resources");
+          });
+        }}
         onSelectMap={setSelectedMapId}
         onCreated={(id, label: ResourceLabel) => {
           setLabels((current) => ({ ...current, [id]: label }));

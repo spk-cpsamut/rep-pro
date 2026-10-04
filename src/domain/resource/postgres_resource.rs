@@ -3,7 +3,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::mpsc;
 
 mod postgres_config;
-use postgres_config::PostgresConfig;
+pub(crate) use postgres_config::{Host, PostgresConfig};
 
 mod pull_batch;
 use pull_batch::PullBatchSize;

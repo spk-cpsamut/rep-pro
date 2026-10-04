@@ -7,7 +7,7 @@ import {
   createResourceMap,
   emptyRule,
   listColumns,
-  previewSanitize,
+  runSanitize as requestSanitize,
   rememberLabel,
   resourceTitle,
   type ColumnMeta,
@@ -33,6 +33,7 @@ type PanelProps = {
   onSelectMap: (id: string) => void;
   onTransferring: (id: string | null) => void;
   onPreview: (mapId: string, preview: SanitizePreview) => void;
+  onRan: () => void;
   onCreated: (id: string, label: ResourceLabel) => void;
   onLinked: () => void;
   onError: (message: string | null) => void;
@@ -49,6 +50,7 @@ export function Panel({
   onSelectMap,
   onTransferring,
   onPreview,
+  onRan,
   onCreated,
   onLinked,
   onError,
@@ -70,9 +72,10 @@ export function Panel({
     onTransferring(mapId);
     onError(null);
     try {
-      const preview = await previewSanitize(mapId);
+      const preview = await requestSanitize(mapId);
       if (ticket !== sanitizeRun.current) return;
       onPreview(mapId, preview);
+      onRan();
     } catch (err) {
       if (ticket === sanitizeRun.current) {
         onError(err instanceof Error ? err.message : "Could not sanitize");

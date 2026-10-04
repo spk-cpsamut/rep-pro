@@ -6,11 +6,14 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::domain::http::{MAX_IDENT, internal_error, is_safe_ident};
+use crate::domain::orchestrator::{OrchestratorError, ParallelOrchestrator};
 use crate::domain::resource::postgres_resource::fetch_sample_row;
-use crate::domain::resource::{Record, Rules, connect_resource};
+use crate::domain::resource::{Record, Rules, connect_resource, load_postgres_resource};
+use crate::domain::resource_map::{PairConfig, ResourceMap};
 use crate::domain::sanitizer::Sanitizer;
 use crate::domain::sanitizer::in_memory_sanitizer::{InMemorySanitizer, SanitizeStorage};
 use crate::domain::state::AppState;
+use crate::infrastructure::persistence::PostgresResourceMapStore;
 
 use super::dao::Dao;
 use super::models::{
@@ -127,6 +130,62 @@ pub(crate) async fn preview_sanitize(
     state: &AppState,
     id: Uuid,
 ) -> Result<SanitizePreview, (StatusCode, &'static str)> {
+    let prepared = prepare_sanitize(state, id).await?;
+    let sanitizer = fresh_sanitizer();
+    examples_for(&prepared, &sanitizer).await
+}
+
+pub(crate) async fn run_sanitize(
+    state: &AppState,
+    id: Uuid,
+) -> Result<SanitizePreview, (StatusCode, &'static str)> {
+    let prepared = prepare_sanitize(state, id).await?;
+    if !valid_table(&prepared.table_target) {
+        return Err((StatusCode::BAD_REQUEST, "invalid table_target"));
+    }
+    let sanitizer = fresh_sanitizer();
+    let preview = examples_for(&prepared, &sanitizer).await?;
+
+    let source =
+        load_postgres_resource(state, prepared.resource_source, &prepared.table_source).await?;
+    let target =
+        load_postgres_resource(state, prepared.resource_target, &prepared.table_target).await?;
+    let store = PostgresResourceMapStore::new(state.resource_maps.pool().clone());
+    for rules in &prepared.rules {
+        let resource_map = ResourceMap::new(
+            prepared.resource_map_id,
+            prepared.resource_source,
+            prepared.resource_target,
+            prepared.table_source.clone(),
+            prepared.table_target.clone(),
+            prepared.pair.clone(),
+        );
+        let mut orchestrator =
+            ParallelOrchestrator::new(source.clone(), target.clone(), resource_map, store.clone());
+        orchestrator
+            .run(rules.clone(), sanitizer.clone())
+            .await
+            .map_err(orchestrator_error)?;
+    }
+    Ok(preview)
+}
+
+struct PreparedSanitize {
+    resource_map_id: Uuid,
+    resource_source: Uuid,
+    resource_target: Uuid,
+    table_source: String,
+    table_target: String,
+    pair: PairConfig,
+    rules: Vec<Rules>,
+    columns: Vec<String>,
+    row: Value,
+}
+
+async fn prepare_sanitize(
+    state: &AppState,
+    id: Uuid,
+) -> Result<PreparedSanitize, (StatusCode, &'static str)> {
     let maps = list_resource_maps(state).await?;
     let map = maps
         .into_iter()
@@ -142,33 +201,36 @@ pub(crate) async fn preview_sanitize(
         .pair_config
         .get("pull_batch_field")
         .and_then(Value::as_str)
-        .ok_or(internal_error())?;
-    if !is_safe_ident(pull_field) {
+        .ok_or(internal_error())?
+        .to_owned();
+    if !is_safe_ident(&pull_field) {
         return Err((StatusCode::BAD_REQUEST, "invalid pull field"));
     }
+    let pair = PairConfig::from_json(map.pair_config).map_err(|_| internal_error())?;
 
-    let mut prepared = Vec::with_capacity(map.rules.len());
+    let mut rules = Vec::with_capacity(map.rules.len());
     for entry in &map.rules {
-        let rules = Rules::from_stored(entry.rule_id, &entry.rule).map_err(|_| internal_error())?;
+        let parsed =
+            Rules::from_stored(entry.rule_id, &entry.rule).map_err(|_| internal_error())?;
         require_ident(
-            &rules
+            &parsed
                 .get_source_identifier()
                 .get_field_identifer_as_string(),
             "invalid source identifier",
         )?;
-        for field in rules.get_source_field() {
+        for field in parsed.get_source_field() {
             require_ident(field.get_field_name(), "invalid field name")?;
         }
-        prepared.push(rules);
+        rules.push(parsed);
     }
 
     let pool = connect_resource(state, map.resource_source).await?;
-    let fetched = fetch_sample_row(&pool, &map.table_source, pull_field).await;
+    let fetched = fetch_sample_row(&pool, &map.table_source, &pull_field).await;
     pool.close().await;
     let fetched = fetched.map_err(|_| (StatusCode::BAD_REQUEST, "cannot query table"))?;
     let (mut columns, row) = fetched.ok_or((StatusCode::BAD_REQUEST, "source table is empty"))?;
-    for rules in &prepared {
-        for field in rules.get_source_field() {
+    for rule in &rules {
+        for field in rule.get_source_field() {
             let name = field.get_field_name();
             if !columns.iter().any(|column| column == name) {
                 columns.push(name.to_owned());
@@ -176,16 +238,43 @@ pub(crate) async fn preview_sanitize(
         }
     }
 
-    let mut examples = Vec::with_capacity(prepared.len());
-    for rules in prepared {
-        examples.push(preview_rule(rules, &row).await?);
+    Ok(PreparedSanitize {
+        resource_map_id: map.resource_map_id,
+        resource_source: map.resource_source,
+        resource_target: map.resource_target,
+        table_source: map.table_source,
+        table_target: map.table_target,
+        pair,
+        rules,
+        columns,
+        row,
+    })
+}
+
+fn fresh_sanitizer() -> InMemorySanitizer {
+    InMemorySanitizer::new(Mutex::new(SanitizeStorage {
+        map: HashMap::new(),
+    }))
+}
+
+async fn examples_for(
+    prepared: &PreparedSanitize,
+    sanitizer: &InMemorySanitizer,
+) -> Result<SanitizePreview, (StatusCode, &'static str)> {
+    let mut examples = Vec::with_capacity(prepared.rules.len());
+    for rules in &prepared.rules {
+        examples.push(preview_rule(rules.clone(), &prepared.row, sanitizer).await?);
     }
-    Ok(SanitizePreview { columns, examples })
+    Ok(SanitizePreview {
+        columns: prepared.columns.clone(),
+        examples,
+    })
 }
 
 async fn preview_rule(
     rules: Rules,
     row: &Value,
+    sanitizer: &InMemorySanitizer,
 ) -> Result<SanitizeExample, (StatusCode, &'static str)> {
     let rule_id = *rules.get_rule_id();
     let field_names: Vec<String> = rules
@@ -193,9 +282,6 @@ async fn preview_rule(
         .iter()
         .map(|field| field.get_field_name().to_owned())
         .collect();
-    let sanitizer = InMemorySanitizer::new(Mutex::new(SanitizeStorage {
-        map: HashMap::new(),
-    }));
     let sanitized = sanitizer
         .sanitize(vec![Record::from_value(row.clone())], rules)
         .await
@@ -217,6 +303,24 @@ fn overlay_sanitized(row: &Value, sanitized: &Value, fields: &[String]) -> Value
         );
     }
     Value::Object(after)
+}
+
+fn orchestrator_error(err: OrchestratorError) -> (StatusCode, &'static str) {
+    match err {
+        OrchestratorError::DownstreamNotAllowed => {
+            (StatusCode::BAD_REQUEST, "source does not allow downstream")
+        }
+        OrchestratorError::UpstreamNotAllowed => {
+            (StatusCode::BAD_REQUEST, "target does not allow upstream")
+        }
+        OrchestratorError::SourceConnectionFailed | OrchestratorError::TargetConnectionFailed => {
+            (StatusCode::BAD_REQUEST, "cannot connect to database")
+        }
+        OrchestratorError::PullFailed => (StatusCode::BAD_REQUEST, "cannot query table"),
+        OrchestratorError::SanitizeFailed => (StatusCode::BAD_REQUEST, "sanitize failed"),
+        OrchestratorError::PushFailed => (StatusCode::BAD_REQUEST, "cannot write to target"),
+        OrchestratorError::SyncUpConfigFailed => internal_error(),
+    }
 }
 
 fn require_ident(name: &str, message: &'static str) -> Result<(), (StatusCode, &'static str)> {
@@ -353,13 +457,14 @@ mod tests {
             }),
         )
         .unwrap();
+        let sanitizer = fresh_sanitizer();
         let row = serde_json::json!({
             "id": "42",
             "email": "jane@acme.com",
             "extra": "unchanged"
         });
 
-        let example = preview_rule(rule, &row).await.unwrap();
+        let example = preview_rule(rule, &row, &sanitizer).await.unwrap();
 
         assert_eq!(example.rule_id, rule_id);
         assert_eq!(example.before["id"], "42");

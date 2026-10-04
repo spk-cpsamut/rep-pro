@@ -196,6 +196,10 @@ export async function previewSanitize(id: string): Promise<SanitizePreview> {
   return request(`/resource-maps/${id}/sanitize-preview`, { method: "POST" });
 }
 
+export async function runSanitize(id: string): Promise<SanitizePreview> {
+  return request(`/resource-maps/${id}/sanitize`, { method: "POST" });
+}
+
 export async function createResourceMap(
   input: CreateResourceMapInput,
 ): Promise<{ resource_map_id: string; rule_ids: string[] }> {

@@ -50,6 +50,10 @@ impl ResourceMapDao {
     pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
 #[async_trait::async_trait]

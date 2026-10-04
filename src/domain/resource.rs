@@ -14,7 +14,7 @@ pub(crate) mod handlers;
 mod models;
 
 pub use errors::{ConnectionError, PullError, PushError, SanitizeError, SyncUpConfigError};
-pub(crate) use handler_inner::connect_resource;
+pub(crate) use handler_inner::{connect_resource, load_postgres_resource};
 
 pub struct Resource<T, S>
 where
@@ -56,6 +56,22 @@ where
         T::Connection: ResourceConnection<T, S>,
     {
         self.config.connect().await
+    }
+}
+
+impl<T, S> Clone for Resource<T, S>
+where
+    T: Config<T, S>,
+    S: Sanitizer,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            allow_upstream: self.allow_upstream,
+            allow_downstream: self.allow_downstream,
+            config: self.config.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 

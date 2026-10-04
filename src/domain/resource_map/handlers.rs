@@ -22,12 +22,20 @@ pub(crate) fn router() -> Router<AppState> {
             "/resource-maps/{id}/sanitize-preview",
             post(preview_sanitize),
         )
+        .route("/resource-maps/{id}/sanitize", post(run_sanitize))
 }
 
 async fn list_resource_maps(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ResourceMapSummary>>, (StatusCode, &'static str)> {
     handler_inner::list_resource_maps(&state).await.map(Json)
+}
+
+async fn run_sanitize(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SanitizePreview>, (StatusCode, &'static str)> {
+    handler_inner::run_sanitize(&state, id).await.map(Json)
 }
 
 async fn preview_sanitize(

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,12 +21,22 @@ pub struct SanitizeStorage {
 }
 
 pub struct InMemorySanitizer {
-    storage: Mutex<SanitizeStorage>,
+    storage: Arc<Mutex<SanitizeStorage>>,
 }
 
 impl InMemorySanitizer {
     pub fn new(storage: Mutex<SanitizeStorage>) -> Self {
-        Self { storage }
+        Self {
+            storage: Arc::new(storage),
+        }
+    }
+}
+
+impl Clone for InMemorySanitizer {
+    fn clone(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+        }
     }
 }
 
@@ -46,18 +59,18 @@ impl InMemorySanitizer {
         records
             .into_iter()
             .map(|record| {
-                let mut allowed = serde_json::Map::new();
+                let mut row = record.fields();
                 let identifier = rules
                     .get_source_identifier()
                     .get_field_identifer_as_string();
-                allowed.insert(identifier, record.get_identifier_val(rules));
+                row.insert(identifier, record.get_identifier_val(rules));
                 for col in rules.get_source_field() {
-                    allowed.insert(
+                    row.insert(
                         col.get_field_name().to_owned(),
                         self.get_mock_data(rules, col, &record),
                     );
                 }
-                SanitizedRecord::new(Value::Object(allowed))
+                SanitizedRecord::new(Value::Object(row))
             })
             .collect()
     }
@@ -97,5 +110,64 @@ impl InMemorySanitizer {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{InMemorySanitizer, SanitizeStorage};
+    use crate::domain::resource::{Record, Rules};
+    use crate::domain::sanitizer::Sanitizer;
+
+    #[tokio::test]
+    async fn unsanitized_columns_are_copied() {
+        let sanitizer = InMemorySanitizer::new(Mutex::new(SanitizeStorage {
+            map: HashMap::new(),
+        }));
+        let rules = Rules::from_stored(
+            Uuid::from_u128(1),
+            &json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": "id",
+                "source_sanitize_fields": [
+                    { "field_name": "name", "sanitize_type": "name" },
+                    { "field_name": "email", "sanitize_type": "email" }
+                ]
+            }),
+        )
+        .unwrap();
+        let source = json!({
+            "id": "42",
+            "name": "Ava Martinez",
+            "email": "ava@example.com",
+            "age": 24,
+            "salary": "43000.00",
+            "department": "HR",
+            "is_active": true
+        });
+
+        let Ok(sanitized) = sanitizer
+            .sanitize(vec![Record::from_value(source)], rules)
+            .await
+        else {
+            panic!("sanitize failed");
+        };
+        let row = &sanitized[0];
+
+        assert_eq!(row["id"], "42");
+        assert_eq!(row["age"], 24);
+        assert_eq!(row["salary"], "43000.00");
+        assert_eq!(row["department"], "HR");
+        assert_eq!(row["is_active"], true);
+        assert_ne!(row["name"], "Ava Martinez");
+        assert_ne!(row["email"], "ava@example.com");
     }
 }

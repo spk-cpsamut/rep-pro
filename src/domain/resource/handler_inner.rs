@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use aws_sdk_kms::primitives::Blob;
 use axum::http::StatusCode;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -12,8 +12,11 @@ use uuid::Uuid;
 use crate::domain::http::{MAX_IDENT, bad_request, internal_error, is_safe_ident};
 use crate::domain::state::AppState;
 
+use super::Resource;
 use super::dao::Dao;
 use super::models::{ColumnMeta, CreateResourceRequest, CreatedResource, ResourceSummary};
+use super::postgres_resource::{DatabaseName, Host, Password, PostgresConfig, Username};
+use crate::domain::sanitizer::in_memory_sanitizer::InMemorySanitizer;
 
 const MAX_PLAINTEXT: usize = 4096;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -89,6 +92,57 @@ pub(crate) async fn connect_resource(
     state: &AppState,
     id: Uuid,
 ) -> Result<PgPool, (StatusCode, &'static str)> {
+    let (username, password, config) = decrypted_resource(state, id).await?;
+    let options = PgConnectOptions::new()
+        .host(&config.host)
+        .port(config.port)
+        .username(&username)
+        .password(&password)
+        .database(&config.database_name);
+
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(CONNECT_TIMEOUT)
+        .connect_with(options)
+        .await
+        .map_err(|_| cannot_connect())
+}
+
+pub(crate) async fn load_postgres_resource(
+    state: &AppState,
+    id: Uuid,
+    table: &str,
+) -> Result<Resource<PostgresConfig, InMemorySanitizer>, (StatusCode, &'static str)> {
+    if table.len() > MAX_IDENT || !is_safe_ident(table) {
+        return Err((StatusCode::BAD_REQUEST, "invalid table"));
+    }
+    let rows = state.resources.list().await.map_err(|_| internal_error())?;
+    let flags = rows
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or((StatusCode::BAD_REQUEST, "resource not found"))?;
+    let (username, password, config) = decrypted_resource(state, id).await?;
+    let postgres = PostgresConfig::new(
+        id,
+        Host::new(config.host).map_err(|_| internal_error())?,
+        config.port,
+        Username::parse(SecretString::from(username)).map_err(|_| internal_error())?,
+        Password::parse(SecretString::from(password)).map_err(|_| internal_error())?,
+        DatabaseName::parse(config.database_name).map_err(|_| internal_error())?,
+        table.to_owned(),
+    );
+    Ok(Resource::new(
+        id,
+        flags.allow_upstream,
+        flags.allow_downstream,
+        postgres,
+    ))
+}
+
+async fn decrypted_resource(
+    state: &AppState,
+    id: Uuid,
+) -> Result<(String, String, StoredResourceConfig), (StatusCode, &'static str)> {
     let row = state
         .resources
         .load_ciphertext(id)
@@ -105,22 +159,8 @@ pub(crate) async fn connect_resource(
 
     let username = String::from_utf8(username).map_err(|_| internal_error())?;
     let password = String::from_utf8(password).map_err(|_| internal_error())?;
-    let config: StoredResourceConfig =
-        serde_json::from_slice(&config).map_err(|_| internal_error())?;
-
-    let options = PgConnectOptions::new()
-        .host(&config.host)
-        .port(config.port)
-        .username(&username)
-        .password(&password)
-        .database(&config.database_name);
-
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(CONNECT_TIMEOUT)
-        .connect_with(options)
-        .await
-        .map_err(|_| cannot_connect())
+    let config = serde_json::from_slice(&config).map_err(|_| internal_error())?;
+    Ok((username, password, config))
 }
 
 #[derive(Deserialize)]

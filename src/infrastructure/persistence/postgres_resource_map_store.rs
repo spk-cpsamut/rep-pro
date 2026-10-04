@@ -6,6 +6,7 @@ use crate::domain::{
     resource_map::{PairConfig, ResourceMapStore},
 };
 
+#[derive(Clone)]
 pub struct PostgresResourceMapStore {
     pool: PgPool,
 }

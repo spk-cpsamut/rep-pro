@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 use sqlx::{Pool, Postgres, QueryBuilder};
 use tokio::sync::mpsc;
@@ -18,6 +20,8 @@ pub async fn push_task(
         return Err(PushError::UnexpectedFailed);
     }
 
+    let column_types = column_types(&pg_pool, &table).await?;
+
     while let Some(sanitized_records) = rx.recv().await {
         if sanitized_records.is_empty() {
             continue;
@@ -28,6 +32,12 @@ pub async fn push_task(
             .ok_or(PushError::UnexpectedFailed)?;
 
         if !columns.keys().any(|c| c == &conflict_field) {
+            return Err(PushError::UnexpectedFailed);
+        }
+        if columns
+            .keys()
+            .any(|column| !column_types.contains_key(column))
+        {
             return Err(PushError::UnexpectedFailed);
         }
 
@@ -46,7 +56,11 @@ pub async fn push_task(
             let obj = record.as_object();
             for col in columns.keys() {
                 let value = obj.and_then(|m| m.get(col)).unwrap_or(&Value::Null);
-                bind_json_value(&mut b, value);
+                let column_type = column_types
+                    .get(col)
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                bind_json_value(&mut b, value, column_type);
             }
         });
 
@@ -88,13 +102,18 @@ fn is_safe_ident(name: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn bind_json_value(b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &str>, value: &Value) {
+fn bind_json_value(
+    b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &str>,
+    value: &Value,
+    column_type: &str,
+) {
     match value {
         Value::Null => {
             b.push("NULL");
         }
         Value::Bool(v) => {
             b.push_bind(*v);
+            b.push_unseparated(format!("::{column_type}"));
         }
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -106,12 +125,82 @@ fn bind_json_value(b: &mut sqlx::query_builder::Separated<'_, '_, Postgres, &str
             } else {
                 b.push_bind(n.to_string());
             }
+            b.push_unseparated(format!("::{column_type}"));
         }
         Value::String(s) => {
             b.push_bind(s.clone());
+            b.push_unseparated(format!("::{column_type}"));
         }
         Value::Array(_) | Value::Object(_) => {
             b.push_bind(sqlx::types::Json(value.clone()));
+            b.push_unseparated(format!("::{column_type}"));
         }
+    }
+}
+
+async fn column_types(
+    pool: &Pool<Postgres>,
+    table: &str,
+) -> Result<HashMap<String, String>, PushError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT a.attname::text, format_type(a.atttypid, a.atttypmod)
+        FROM pg_catalog.pg_attribute a
+        WHERE a.attrelid = $1::regclass
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        "#,
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PushError::UnexpectedFailed)?;
+
+    let mut types = HashMap::new();
+    for (name, type_name) in rows {
+        if !is_safe_type_name(&type_name) {
+            return Err(PushError::UnexpectedFailed);
+        }
+        types.insert(name, type_name);
+    }
+    Ok(types)
+}
+
+fn is_safe_type_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '.' | '(' | ')' | ',' | '[' | ']')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_json_value;
+    use serde_json::json;
+    use sqlx::{Postgres, QueryBuilder};
+
+    #[test]
+    fn text_values_are_cast_to_the_target_column_type() {
+        let row = json!({
+            "id": "00ffcfde-f578-4b43-b1e9-6c07f340b154",
+            "name": "Ava"
+        });
+        let columns = row.as_object().unwrap();
+        let mut qb = QueryBuilder::<Postgres>::new("INSERT INTO users (id, name) ");
+        qb.push_values(std::iter::once(&row), |mut b, record| {
+            let obj = record.as_object().unwrap();
+            for col in columns.keys() {
+                let column_type = if col == "id" {
+                    "uuid"
+                } else {
+                    "character varying"
+                };
+                bind_json_value(&mut b, obj.get(col).unwrap(), column_type);
+            }
+        });
+        assert_eq!(
+            qb.sql(),
+            "INSERT INTO users (id, name) VALUES ($1::uuid, $2::character varying)"
+        );
     }
 }

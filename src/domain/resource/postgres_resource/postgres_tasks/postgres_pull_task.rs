@@ -32,29 +32,31 @@ pub async fn pull_task(
                 return Err(PullError::FailedToExtractData);
             }
 
+            let column_type = column_type_name(&pg_pool, &table, &field).await?;
             let mut pointer = pointer;
             let mut first_run = true;
             loop {
                 let mut records: Vec<Record> = Vec::new();
-
-                let mut qb =
-                    QueryBuilder::<Postgres>::new(format!("SELECT * FROM {} WHERE 1=1", table));
-
-                if let Some(p) = &pointer
-                    && !(rules.force_pull_from_start && first_run)
-                {
-                    qb.push(format!(" AND {} >", &field));
-                    qb.push_bind(p);
-                }
-
-                qb.push(format!(" ORDER BY {} LIMIT", &field));
-                qb.push_bind(batch_size.get() as i64);
-
-                let rows = qb
-                    .build()
-                    .fetch_all(&pg_pool)
-                    .await
-                    .map_err(|_| PullError::FailedToExtractData)?;
+                let apply_pointer =
+                    pointer.is_some() && !(rules.force_pull_from_start && first_run);
+                let rows = {
+                    let bound = if apply_pointer {
+                        pointer.as_deref()
+                    } else {
+                        None
+                    };
+                    let mut qb = cursor_query(
+                        &table,
+                        &field,
+                        &column_type,
+                        bound,
+                        batch_size.get() as i64,
+                    );
+                    qb.build()
+                        .fetch_all(&pg_pool)
+                        .await
+                        .map_err(|_| PullError::FailedToExtractData)?
+                };
 
                 if rows.is_empty() {
                     break;
@@ -179,10 +181,92 @@ fn decode_pg_value(row: &PgRow, ordinal: usize, type_name: &str) -> Result<Value
     }
 }
 
+fn cursor_query<'a>(
+    table: &str,
+    field: &str,
+    column_type: &str,
+    pointer: Option<&'a str>,
+    limit: i64,
+) -> QueryBuilder<'a, Postgres> {
+    let mut qb = QueryBuilder::<Postgres>::new(format!("SELECT * FROM {table} WHERE 1=1"));
+    if let Some(pointer) = pointer {
+        qb.push(format!(" AND {field} > "));
+        qb.push_bind(pointer);
+        qb.push(format!("::{column_type}"));
+    }
+    qb.push(format!(" ORDER BY {field} LIMIT "));
+    qb.push_bind(limit);
+    qb
+}
+
+async fn column_type_name(
+    pool: &Pool<Postgres>,
+    table: &str,
+    column: &str,
+) -> Result<String, PullError> {
+    let type_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT format_type(a.atttypid, a.atttypmod)
+        FROM pg_catalog.pg_attribute a
+        WHERE a.attrelid = $1::regclass
+          AND a.attname = $2
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        "#,
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| PullError::FailedToExtractData)?;
+
+    let type_name = type_name.ok_or(PullError::FailedToExtractData)?;
+    if !is_safe_type_name(&type_name) {
+        return Err(PullError::FailedToExtractData);
+    }
+    Ok(type_name)
+}
+
 fn is_safe_ident(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_safe_type_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '.' | '(' | ')' | ',' | '[' | ']')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_query;
+
+    #[test]
+    fn limit_placeholder_is_separated_from_the_keyword() {
+        let query = cursor_query("users", "id", "uuid", None, 100);
+        assert_eq!(
+            query.sql(),
+            "SELECT * FROM users WHERE 1=1 ORDER BY id LIMIT $1"
+        );
+    }
+
+    #[test]
+    fn checkpoint_is_cast_to_the_column_type() {
+        let query = cursor_query(
+            "users",
+            "created_at",
+            "timestamp with time zone",
+            Some("2026-10-03T16:17:36.422975+00:00"),
+            100,
+        );
+        assert_eq!(
+            query.sql(),
+            "SELECT * FROM users WHERE 1=1 AND created_at > $1::timestamp with time zone ORDER BY created_at LIMIT $2"
+        );
+    }
 }
 
 fn json_value_to_checkpoint(value: &Value) -> String {
