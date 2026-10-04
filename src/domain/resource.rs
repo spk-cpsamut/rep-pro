@@ -14,6 +14,7 @@ pub(crate) mod handlers;
 mod models;
 
 pub use errors::{ConnectionError, PullError, PushError, SanitizeError, SyncUpConfigError};
+pub(crate) use handler_inner::connect_resource;
 
 pub struct Resource<T, S>
 where
@@ -81,6 +82,10 @@ impl Deref for Record {
 }
 
 impl Record {
+    pub(crate) fn from_value(value: Value) -> Self {
+        Self(value)
+    }
+
     pub fn get_identifier_val(&self, rules: &Rules) -> Value {
         let field = rules
             .get_source_identifier()
@@ -105,6 +110,20 @@ pub enum NamingConvention {
     ScreamingCase,
     KebabCase,
     TrainCase,
+}
+
+impl NamingConvention {
+    pub(crate) fn parse(value: &str) -> Result<Self, ()> {
+        match value {
+            "camel_case" => Ok(Self::CamelCase),
+            "pascal_case" => Ok(Self::PascalCase),
+            "snake_case" => Ok(Self::SnakeCase),
+            "screaming_case" => Ok(Self::ScreamingCase),
+            "kebab_case" => Ok(Self::KebabCase),
+            "train_case" => Ok(Self::TrainCase),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -144,6 +163,18 @@ pub enum SanitizeType {
     Email,
     PhoneNumber,
     Ssn,
+}
+
+impl SanitizeType {
+    pub(crate) fn parse(value: &str) -> Result<Self, ()> {
+        match value {
+            "name" => Ok(Self::Name),
+            "email" => Ok(Self::Email),
+            "phone_number" => Ok(Self::PhoneNumber),
+            "ssn" => Ok(Self::Ssn),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -192,6 +223,59 @@ pub struct Rules {
 }
 
 impl Rules {
+    pub(crate) fn from_stored(rule_id: Uuid, value: &Value) -> Result<Self, ()> {
+        let force_pull_from_start = value
+            .get("force_pull_from_start")
+            .and_then(Value::as_bool)
+            .ok_or(())?;
+        let source_naming_convention = NamingConvention::parse(
+            value
+                .get("source_naming_convention")
+                .and_then(Value::as_str)
+                .ok_or(())?,
+        )?;
+        let target_naming_convention = NamingConvention::parse(
+            value
+                .get("target_naming_convention")
+                .and_then(Value::as_str)
+                .ok_or(())?,
+        )?;
+        let identifier = value
+            .get("source_identifier")
+            .and_then(Value::as_str)
+            .ok_or(())?;
+        let fields = value
+            .get("source_sanitize_fields")
+            .and_then(Value::as_array)
+            .ok_or(())?;
+        let mut source_sanitize_fields = Vec::with_capacity(fields.len());
+        for field in fields {
+            let field_name = field
+                .get("field_name")
+                .and_then(Value::as_str)
+                .ok_or(())?
+                .to_owned();
+            let sanitize_type = SanitizeType::parse(
+                field
+                    .get("sanitize_type")
+                    .and_then(Value::as_str)
+                    .ok_or(())?,
+            )?;
+            source_sanitize_fields.push(FieldRecord {
+                sanitize_type,
+                field_name,
+            });
+        }
+        Ok(Self {
+            rule_id,
+            force_pull_from_start,
+            source_naming_convention,
+            target_naming_convention,
+            source_sanitize_fields,
+            source_identifier: FieldIdentifierKey::String(identifier.to_owned()),
+        })
+    }
+
     pub fn get_source_field(&self) -> &Vec<FieldRecord> {
         &self.source_sanitize_fields
     }

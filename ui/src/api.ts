@@ -82,6 +82,17 @@ export type ColumnMeta = {
   is_primary_key: boolean;
 };
 
+export type SanitizeExample = {
+  rule_id: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+};
+
+export type SanitizePreview = {
+  columns: string[];
+  examples: SanitizeExample[];
+};
+
 export type ResourceMapSummary = {
   resource_map_id: string;
   resource_source: string;
@@ -179,6 +190,10 @@ export async function createResource(
       },
     }),
   });
+}
+
+export async function previewSanitize(id: string): Promise<SanitizePreview> {
+  return request(`/resource-maps/${id}/sanitize-preview`, { method: "POST" });
 }
 
 export async function createResourceMap(

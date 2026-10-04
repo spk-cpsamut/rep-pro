@@ -7,6 +7,7 @@ import {
   type ResourceLabel,
   type ResourceMapSummary,
   type ResourceSummary,
+  type SanitizePreview,
 } from "./api.ts";
 import { Panel } from "./panel.tsx";
 import { Scene } from "./scene.tsx";
@@ -18,6 +19,8 @@ function App() {
   const [labels, setLabels] = useState(readLabels);
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+  const [transferringMapId, setTransferringMapId] = useState<string | null>(null);
+  const [previews, setPreviews] = useState<Record<string, SanitizePreview>>({});
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
@@ -44,6 +47,8 @@ function App() {
         labels={labels}
         selectedResourceId={selectedResourceId}
         selectedMapId={selectedMapId}
+        transferringMapId={transferringMapId}
+        previews={previews}
         onSelectResource={setSelectedResourceId}
         onSelectMap={setSelectedMapId}
       />
@@ -53,7 +58,12 @@ function App() {
         labels={labels}
         selectedResourceId={selectedResourceId}
         selectedMapId={selectedMapId}
+        transferringMapId={transferringMapId}
         error={error}
+        onTransferring={setTransferringMapId}
+        onPreview={(mapId, preview) =>
+          setPreviews((current) => ({ ...current, [mapId]: preview }))
+        }
         onSelectMap={setSelectedMapId}
         onCreated={(id, label: ResourceLabel) => {
           setLabels((current) => ({ ...current, [id]: label }));

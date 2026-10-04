@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   NAMING_CONVENTIONS,
   PULL_STRATEGIES,
@@ -7,6 +7,7 @@ import {
   createResourceMap,
   emptyRule,
   listColumns,
+  previewSanitize,
   rememberLabel,
   resourceTitle,
   type ColumnMeta,
@@ -17,6 +18,7 @@ import {
   type ResourceMapSummary,
   type ResourceSummary,
   type RuleInput,
+  type SanitizePreview,
   type SanitizeType,
 } from "./api.ts";
 
@@ -26,8 +28,11 @@ type PanelProps = {
   labels: Record<string, ResourceLabel>;
   selectedResourceId: string | null;
   selectedMapId: string | null;
+  transferringMapId: string | null;
   error: string | null;
   onSelectMap: (id: string) => void;
+  onTransferring: (id: string | null) => void;
+  onPreview: (mapId: string, preview: SanitizePreview) => void;
   onCreated: (id: string, label: ResourceLabel) => void;
   onLinked: () => void;
   onError: (message: string | null) => void;
@@ -39,8 +44,11 @@ export function Panel({
   labels,
   selectedResourceId,
   selectedMapId,
+  transferringMapId,
   error,
   onSelectMap,
+  onTransferring,
+  onPreview,
   onCreated,
   onLinked,
   onError,
@@ -50,10 +58,33 @@ export function Panel({
   const targets = resources.filter((resource) => resource.allow_upstream);
   const selected = resources.find((resource) => resource.id === selectedResourceId);
   const selectedMap = maps.find((map) => map.resource_map_id === selectedMapId);
+  const sanitizeRun = useRef(0);
 
   useEffect(() => {
     if (selectedMapId) setTab("link");
   }, [selectedMapId]);
+
+  async function runSanitize(mapId: string) {
+    const ticket = ++sanitizeRun.current;
+    const started = performance.now();
+    onTransferring(mapId);
+    onError(null);
+    try {
+      const preview = await previewSanitize(mapId);
+      if (ticket !== sanitizeRun.current) return;
+      onPreview(mapId, preview);
+    } catch (err) {
+      if (ticket === sanitizeRun.current) {
+        onError(err instanceof Error ? err.message : "Could not sanitize");
+      }
+    } finally {
+      const remaining = 1200 - (performance.now() - started);
+      if (remaining > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remaining));
+      }
+      if (ticket === sanitizeRun.current) onTransferring(null);
+    }
+  }
 
   return (
     <aside className="panel">
@@ -151,7 +182,13 @@ export function Panel({
               ))}
             </ul>
           )}
-          {selectedMap ? <LinkDetail map={selectedMap} /> : null}
+          {selectedMap ? (
+            <LinkDetail
+              map={selectedMap}
+              pending={transferringMapId === selectedMap.resource_map_id}
+              onRun={() => void runSanitize(selectedMap.resource_map_id)}
+            />
+          ) : null}
         </section>
       </div>
     </aside>
@@ -700,12 +737,23 @@ function isSafeTable(name: string): boolean {
   return name.length > 0 && name.length <= 255 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
-function LinkDetail({ map }: { map: ResourceMapSummary }) {
+function LinkDetail({
+  map,
+  pending,
+  onRun,
+}: {
+  map: ResourceMapSummary;
+  pending: boolean;
+  onRun: () => void;
+}) {
   return (
     <div className="detail">
       <p>
         {map.pair_config.pull_batch_strategy} on {map.pair_config.pull_batch_field}
       </p>
+      <button type="button" disabled={pending} onClick={onRun}>
+        {pending ? "Sanitizing…" : "Run sanitize"}
+      </button>
       {map.rules.map((entry) => (
         <article key={entry.rule_id}>
           <h3>{entry.rule.source_identifier}</h3>

@@ -25,6 +25,8 @@ use crate::domain::{
 };
 use postgres_connection::PostgresConnection;
 
+pub(crate) use postgres_tasks::postgres_pull_task::fetch_sample_row;
+
 use errors::*;
 
 #[async_trait::async_trait]

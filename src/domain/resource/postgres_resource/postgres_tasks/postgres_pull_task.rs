@@ -104,6 +104,36 @@ pub async fn pull_task(
     Ok::<PullBatchStrategy, PullError>(updated_strategy)
 }
 
+pub(crate) async fn fetch_sample_row(
+    pool: &Pool<Postgres>,
+    table: &str,
+    order_by: &str,
+) -> Result<Option<(Vec<String>, Value)>, ()> {
+    if !is_safe_ident(table) || !is_safe_ident(order_by) {
+        return Err(());
+    }
+
+    let sql = format!("SELECT * FROM {table} ORDER BY {order_by} LIMIT 1");
+    let row = sqlx::query(&sql)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ())?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let mut columns = Vec::new();
+    let mut object = serde_json::Map::new();
+    for column in row.columns() {
+        let name = column.name().to_owned();
+        let value =
+            decode_pg_value(&row, column.ordinal(), column.type_info().name()).map_err(|_| ())?;
+        columns.push(name.clone());
+        object.insert(name, value);
+    }
+    Ok(Some((columns, Value::Object(object))))
+}
+
 fn decode_pg_value(row: &PgRow, ordinal: usize, type_name: &str) -> Result<Value, sqlx::Error> {
     let raw = row.try_get_raw(ordinal)?;
     if raw.is_null() {

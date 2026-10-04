@@ -285,6 +285,63 @@ button.tiny {
   padding-left: 18px;
 }
 
+.detail > button {
+  justify-self: start;
+}
+
+.preview-float {
+  transform: translateY(calc(-50% - 12px));
+  pointer-events: none;
+}
+
+.preview-card {
+  max-height: 280px;
+  overflow: auto;
+  pointer-events: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(16, 20, 26, 0.94);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.preview-table {
+  border-collapse: collapse;
+  color: var(--text);
+  font: 12px/1.35 "IBM Plex Sans", sans-serif;
+}
+
+.preview-table th,
+.preview-table td {
+  max-width: 180px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-table thead th {
+  position: sticky;
+  top: 0;
+  background: #171c23;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.preview-table tbody th {
+  color: var(--sand);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 500;
+}
+
+.preview-table tr.changed td:last-child {
+  color: var(--ok);
+}
+
 .node-label {
   width: max-content;
   max-width: 180px;

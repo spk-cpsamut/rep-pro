@@ -79,6 +79,16 @@ pub(crate) async fn list_columns(
         return Err((StatusCode::BAD_REQUEST, "invalid table"));
     }
 
+    let pool = connect_resource(state, id).await?;
+    let columns = query_columns(&pool, schema, table).await;
+    pool.close().await;
+    columns
+}
+
+pub(crate) async fn connect_resource(
+    state: &AppState,
+    id: Uuid,
+) -> Result<PgPool, (StatusCode, &'static str)> {
     let row = state
         .resources
         .load_ciphertext(id)
@@ -105,16 +115,12 @@ pub(crate) async fn list_columns(
         .password(&password)
         .database(&config.database_name);
 
-    let pool = PgPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(CONNECT_TIMEOUT)
         .connect_with(options)
         .await
-        .map_err(|_| cannot_connect())?;
-
-    let columns = query_columns(&pool, schema, table).await;
-    pool.close().await;
-    columns
+        .map_err(|_| cannot_connect())
 }
 
 #[derive(Deserialize)]

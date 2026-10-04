@@ -44,6 +44,19 @@ pub(crate) struct CreatedResourceMap {
 }
 
 #[derive(Serialize)]
+pub(crate) struct SanitizePreview {
+    pub columns: Vec<String>,
+    pub examples: Vec<SanitizeExample>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SanitizeExample {
+    pub rule_id: Uuid,
+    pub before: Value,
+    pub after: Value,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ResourceMapSummary {
     pub resource_map_id: Uuid,
     pub resource_source: Uuid,
