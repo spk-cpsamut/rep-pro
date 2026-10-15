@@ -240,6 +240,29 @@ button.tiny {
   background: rgba(198, 215, 164, 0.1);
 }
 
+.key-block {
+  display: grid;
+  gap: 8px;
+}
+
+.key-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.key-list li {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--sand);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
 .link-list {
   display: grid;
   gap: 8px;

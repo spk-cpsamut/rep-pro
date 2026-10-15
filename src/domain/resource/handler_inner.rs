@@ -14,9 +14,12 @@ use crate::domain::state::AppState;
 
 use super::Resource;
 use super::dao::Dao;
-use super::models::{ColumnMeta, CreateResourceRequest, CreatedResource, ResourceSummary};
+use super::models::{
+    ColumnMeta, CreatePersistentKeyRequest, CreateResourceRequest, CreatedPersistentKey,
+    CreatedResource, PersistentKeySummary, ResourceSummary,
+};
 use super::postgres_resource::{DatabaseName, Host, Password, PostgresConfig, Username};
-use crate::domain::sanitizer::in_memory_sanitizer::InMemorySanitizer;
+use crate::domain::sanitizer::persistent_sanitizer::PersistentSanitizer;
 
 const MAX_PLAINTEXT: usize = 4096;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -112,7 +115,7 @@ pub(crate) async fn load_postgres_resource(
     state: &AppState,
     id: Uuid,
     table: &str,
-) -> Result<Resource<PostgresConfig, InMemorySanitizer>, (StatusCode, &'static str)> {
+) -> Result<Resource<PostgresConfig, PersistentSanitizer>, (StatusCode, &'static str)> {
     if table.len() > MAX_IDENT || !is_safe_ident(table) {
         return Err((StatusCode::BAD_REQUEST, "invalid table"));
     }
@@ -225,6 +228,73 @@ async fn probe_resource(req: &CreateResourceRequest) -> Result<(), (StatusCode, 
     pool.close().await;
     queried.map_err(|_| cannot_query())?;
     Ok(())
+}
+
+pub(crate) async fn list_persistent_keys(
+    state: &AppState,
+    resource_id: Uuid,
+) -> Result<Vec<PersistentKeySummary>, (StatusCode, &'static str)> {
+    if !resource_exists(state, resource_id).await? {
+        return Err((StatusCode::BAD_REQUEST, "resource not found"));
+    }
+    let rows = state
+        .resources
+        .list_persistent_keys(resource_id)
+        .await
+        .map_err(|_| internal_error())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PersistentKeySummary {
+            id: row.id,
+            name: row.name,
+        })
+        .collect())
+}
+
+pub(crate) async fn create_persistent_key(
+    state: &AppState,
+    resource_id: Uuid,
+    req: CreatePersistentKeyRequest,
+) -> Result<CreatedPersistentKey, (StatusCode, &'static str)> {
+    if req.name.len() > MAX_IDENT || !is_safe_ident(&req.name) {
+        return Err((StatusCode::BAD_REQUEST, "invalid persistent key"));
+    }
+    if !resource_exists(state, resource_id).await? {
+        return Err((StatusCode::BAD_REQUEST, "resource not found"));
+    }
+    let row = state
+        .resources
+        .insert_persistent_key(resource_id, &req.name)
+        .await
+        .map_err(map_key_error)?;
+    Ok(CreatedPersistentKey {
+        id: row.id,
+        name: row.name,
+        resource_id,
+    })
+}
+
+async fn resource_exists(
+    state: &AppState,
+    resource_id: Uuid,
+) -> Result<bool, (StatusCode, &'static str)> {
+    state
+        .resources
+        .resource_exists(resource_id)
+        .await
+        .map_err(|_| internal_error())
+}
+
+fn map_key_error(err: sqlx::Error) -> (StatusCode, &'static str) {
+    match &err {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            (StatusCode::CONFLICT, "persistent key already exists")
+        }
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+            (StatusCode::BAD_REQUEST, "resource not found")
+        }
+        _ => internal_error(),
+    }
 }
 
 fn cannot_connect() -> (StatusCode, &'static str) {

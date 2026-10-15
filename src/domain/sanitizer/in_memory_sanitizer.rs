@@ -6,14 +6,9 @@ use std::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use fake::Fake;
-use fake::faker::internet::en::SafeEmail;
-use fake::faker::name::en::Name;
-use fake::faker::phone_number::en::PhoneNumber;
-
 use crate::domain::{
-    resource::{FieldIdentifierValue, FieldRecord, Record, Rules, SanitizeType, SanitizedRecord},
-    sanitizer::{Sanitizer, errors::SanitizerError},
+    resource::{FieldIdentifierValue, FieldRecord, Record, Rules, SanitizedRecord},
+    sanitizer::{Sanitizer, errors::SanitizerError, generate_mock_text},
 };
 
 pub struct SanitizeStorage {
@@ -87,29 +82,11 @@ impl InMemorySanitizer {
             return val.clone();
         }
 
-        let v = Self::generate_mock_data(col.get_sanitize_type());
+        let v = json!(generate_mock_text(col.get_sanitize_type()));
 
         storage.map.insert(key, v.clone());
 
         v
-    }
-
-    fn generate_mock_data(sanitize_type: &SanitizeType) -> Value {
-        match sanitize_type {
-            SanitizeType::Name => json!(Name().fake::<String>()),
-            SanitizeType::Email => json!(SafeEmail().fake::<String>()),
-            SanitizeType::PhoneNumber => json!(PhoneNumber().fake::<String>()),
-            SanitizeType::Ssn => {
-                // no built-in SSN faker — roll a simple pattern
-                let n: u32 = (100_000_000..999_999_999).fake();
-                json!(format!(
-                    "{:03}-{:02}-{:04}",
-                    n / 1_000_000,
-                    (n / 10_000) % 100,
-                    n % 10_000
-                ))
-            }
-        }
     }
 }
 
@@ -132,6 +109,7 @@ mod tests {
         }));
         let rules = Rules::from_stored(
             Uuid::from_u128(1),
+            Uuid::from_u128(2),
             &json!({
                 "force_pull_from_start": false,
                 "source_naming_convention": "snake_case",

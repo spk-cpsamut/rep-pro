@@ -26,6 +26,24 @@ pub(crate) struct CreatedResource {
     pub resource_id: Uuid,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct CreatePersistentKeyRequest {
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PersistentKeySummary {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CreatedPersistentKey {
+    pub id: Uuid,
+    pub name: String,
+    pub resource_id: Uuid,
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct ColumnMeta {
     pub column_name: String,

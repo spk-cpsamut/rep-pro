@@ -39,6 +39,7 @@ export type RuleInput = {
   source_naming_convention: NamingConvention;
   target_naming_convention: NamingConvention;
   source_identifier: string;
+  persistent_key: string;
   fields: FieldInput[];
 };
 
@@ -73,7 +74,13 @@ export type StoredRule = {
   source_naming_convention: string;
   target_naming_convention: string;
   source_identifier: string;
+  persistent_key: string;
   source_sanitize_fields: StoredField[];
+};
+
+export type PersistentKey = {
+  id: string;
+  name: string;
 };
 
 export type ColumnMeta = {
@@ -150,8 +157,24 @@ export function emptyRule(): RuleInput {
     source_naming_convention: "snake_case",
     target_naming_convention: "snake_case",
     source_identifier: "id",
+    persistent_key: "",
     fields: [{ field_name: "", sanitize_type: "name" }],
   };
+}
+
+export async function listPersistentKeys(resourceId: string): Promise<PersistentKey[]> {
+  return request<PersistentKey[]>(`/resources/${resourceId}/persistent-keys`);
+}
+
+export async function createPersistentKey(
+  resourceId: string,
+  name: string,
+): Promise<PersistentKey & { resource_id: string }> {
+  return request(`/resources/${resourceId}/persistent-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
 }
 
 export async function listColumns(

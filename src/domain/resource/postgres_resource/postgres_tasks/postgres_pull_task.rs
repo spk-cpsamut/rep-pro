@@ -45,13 +45,8 @@ pub async fn pull_task(
                     } else {
                         None
                     };
-                    let mut qb = cursor_query(
-                        &table,
-                        &field,
-                        &column_type,
-                        bound,
-                        batch_size.get() as i64,
-                    );
+                    let mut qb =
+                        cursor_query(&table, &field, &column_type, bound, batch_size.get() as i64);
                     qb.build()
                         .fetch_all(&pg_pool)
                         .await

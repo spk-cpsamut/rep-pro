@@ -28,6 +28,7 @@ pub(crate) struct RuleRequest {
     pub source_naming_convention: String,
     pub target_naming_convention: String,
     pub source_identifier: String,
+    pub persistent_key: String,
     pub fields: Vec<FieldRequest>,
 }
 
@@ -70,6 +71,7 @@ pub(crate) struct ResourceMapSummary {
 #[derive(Serialize)]
 pub(crate) struct RuleSummary {
     pub rule_id: Uuid,
+    pub persistent_key_id: Uuid,
     pub rule: Value,
 }
 
@@ -91,6 +93,7 @@ impl From<RuleRow> for RuleSummary {
     fn from(row: RuleRow) -> Self {
         Self {
             rule_id: row.id,
+            persistent_key_id: row.persistent_key_id,
             rule: row.rule.0,
         }
     }
@@ -113,6 +116,7 @@ pub(crate) fn stored_rule(rule: &RuleRequest) -> Value {
         "source_naming_convention": rule.source_naming_convention,
         "target_naming_convention": rule.target_naming_convention,
         "source_identifier": rule.source_identifier,
+        "persistent_key": rule.persistent_key,
         "source_sanitize_fields": rule.fields.iter().map(|field| json!({
             "field_name": field.field_name,
             "sanitize_type": field.sanitize_type,

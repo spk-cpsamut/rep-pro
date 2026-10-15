@@ -3,16 +3,19 @@ import {
   NAMING_CONVENTIONS,
   PULL_STRATEGIES,
   SANITIZE_TYPES,
+  createPersistentKey,
   createResource,
   createResourceMap,
   emptyRule,
   listColumns,
+  listPersistentKeys,
   runSanitize as requestSanitize,
   rememberLabel,
   resourceTitle,
   type ColumnMeta,
   type FieldInput,
   type NamingConvention,
+  type PersistentKey,
   type PullStrategy,
   type ResourceLabel,
   type ResourceMapSummary,
@@ -345,13 +348,51 @@ function LinkForm({
   const [rules, setRules] = useState<RuleInput[]>([emptyRule()]);
   const [columns, setColumns] = useState<ColumnMeta[]>([]);
   const [columnHint, setColumnHint] = useState<string | null>(null);
+  const [keys, setKeys] = useState<PersistentKey[]>([]);
+  const [keyName, setKeyName] = useState("");
+  const [keyHint, setKeyHint] = useState<string | null>(null);
+  const [keysTick, setKeysTick] = useState(0);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const keysReady = rules.every((rule) => keys.some((key) => key.name === rule.persistent_key));
   const columnMessage =
     columnHint ??
     (sourceId && tableSource && !isSafeTable(tableSource)
       ? "Table name must be a plain identifier."
       : null);
+
+  useEffect(() => {
+    if (!sourceId) {
+      setKeys([]);
+      setKeyHint(null);
+      return;
+    }
+
+    let cancelled = false;
+    setKeyHint("Loading persistent keys…");
+    void listPersistentKeys(sourceId)
+      .then((next) => {
+        if (cancelled) return;
+        setKeys(next);
+        setKeyHint(null);
+        const names = new Set(next.map((key) => key.name));
+        setRules((current) =>
+          current.map((rule) => ({
+            ...rule,
+            persistent_key: names.has(rule.persistent_key) ? rule.persistent_key : "",
+          })),
+        );
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setKeys([]);
+        setKeyHint(err instanceof Error ? err.message : "Could not load persistent keys");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceId, keysTick]);
 
   useEffect(() => {
     if (!sourceId || !isSafeTable(tableSource)) return;
@@ -407,6 +448,24 @@ function LinkForm({
     if (!selected.allow_upstream) return;
     setTargetId(selected.id);
     setTableTarget((current) => current || knownTable);
+  }
+
+  async function addKey() {
+    const name = keyName.trim();
+    if (!sourceId || !name) return;
+    onError(null);
+    try {
+      const created = await createPersistentKey(sourceId, name);
+      setKeyName("");
+      setRules((current) =>
+        current.map((rule) =>
+          rule.persistent_key ? rule : { ...rule, persistent_key: created.name },
+        ),
+      );
+      setKeysTick((current) => current + 1);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not add persistent key");
+    }
   }
 
   async function onSubmit(event: FormEvent) {
@@ -478,6 +537,45 @@ function LinkForm({
           ))}
         </select>
       </label>
+      {sourceId ? (
+        <div className="key-block">
+          <p className="hint">Persistent keys for this source</p>
+          {keyHint ? <p className="hint">{keyHint}</p> : null}
+          {!keyHint && keys.length === 0 ? (
+            <p className="hint">No persistent keys yet. Name one to reuse it on other links.</p>
+          ) : null}
+          {keys.length > 0 ? (
+            <ul className="key-list">
+              {keys.map((key) => (
+                <li key={key.id}>{key.name}</li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="split">
+            <label>
+              New persistent key
+              <input
+                value={keyName}
+                onChange={(event) => setKeyName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void addKey();
+                  }
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="ghost"
+              disabled={!keyName.trim()}
+              onClick={() => void addKey()}
+            >
+              Add key
+            </button>
+          </div>
+        </div>
+      ) : null}
       <label>
         Target
         <select value={targetId} onChange={(event) => setTargetId(event.target.value)} required>
@@ -539,6 +637,7 @@ function LinkForm({
             index={index}
             rule={rule}
             columns={columns}
+            keys={keys}
             canRemove={rules.length > 1}
             onChange={(next) =>
               setRules((current) => current.map((item, itemIndex) => (itemIndex === index ? next : item)))
@@ -555,7 +654,7 @@ function LinkForm({
         </button>
       </div>
 
-      <button type="submit" disabled={pending || columns.length === 0}>
+      <button type="submit" disabled={pending || columns.length === 0 || !keysReady}>
         {pending ? "Linking…" : "Link resources"}
       </button>
       {notice ? <p className="banner ok">{notice}</p> : null}
@@ -567,6 +666,7 @@ function RuleEditor({
   index,
   rule,
   columns,
+  keys,
   canRemove,
   onChange,
   onRemove,
@@ -574,6 +674,7 @@ function RuleEditor({
   index: number;
   rule: RuleInput;
   columns: ColumnMeta[];
+  keys: PersistentKey[];
   canRemove: boolean;
   onChange: (rule: RuleInput) => void;
   onRemove: () => void;
@@ -588,6 +689,22 @@ function RuleEditor({
   return (
     <fieldset className="rule-card">
       <legend>Rule {index + 1}</legend>
+      <label>
+        Persistent key
+        <select
+          value={keys.some((key) => key.name === rule.persistent_key) ? rule.persistent_key : ""}
+          onChange={(event) => onChange({ ...rule, persistent_key: event.target.value })}
+          required
+          disabled={keys.length === 0}
+        >
+          <option value="">Choose a persistent key</option>
+          {keys.map((key) => (
+            <option key={key.id} value={key.name}>
+              {key.name}
+            </option>
+          ))}
+        </select>
+      </label>
       <label>
         Source identifier
         <ColumnSelect
@@ -759,7 +876,10 @@ function LinkDetail({
       </button>
       {map.rules.map((entry) => (
         <article key={entry.rule_id}>
-          <h3>{entry.rule.source_identifier}</h3>
+          <h3>
+            {entry.rule.source_identifier}
+            {entry.rule.persistent_key ? ` · ${entry.rule.persistent_key}` : ""}
+          </h3>
           <p>
             {entry.rule.source_naming_convention} to {entry.rule.target_naming_convention}
             {entry.rule.force_pull_from_start ? " · pull from start" : ""}

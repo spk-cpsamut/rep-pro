@@ -21,7 +21,7 @@ use crate::domain::{
         SanitizeError, SanitizedRecord,
         postgres_resource::postgres_tasks::postgres_push_task::push_task,
     },
-    sanitizer::{Sanitizer, in_memory_sanitizer::InMemorySanitizer},
+    sanitizer::{Sanitizer, persistent_sanitizer::PersistentSanitizer},
 };
 use postgres_connection::PostgresConnection;
 
@@ -30,7 +30,7 @@ pub(crate) use postgres_tasks::postgres_pull_task::fetch_sample_row;
 use errors::*;
 
 #[async_trait::async_trait]
-impl Config<PostgresConfig, InMemorySanitizer> for PostgresConfig {
+impl Config<PostgresConfig, PersistentSanitizer> for PostgresConfig {
     type Connection = PostgresConnection;
     async fn connect(&mut self) -> Result<PostgresConnection, ConnectionError> {
         let database_url = format!(
@@ -57,7 +57,7 @@ impl Config<PostgresConfig, InMemorySanitizer> for PostgresConfig {
 }
 
 #[async_trait::async_trait]
-impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnection {
+impl ResourceConnection<PostgresConfig, PersistentSanitizer> for PostgresConnection {
     async fn pull(
         &self,
         tx: mpsc::Sender<Vec<Record>>,
@@ -80,7 +80,7 @@ impl ResourceConnection<PostgresConfig, InMemorySanitizer> for PostgresConnectio
         tx: mpsc::Sender<Vec<SanitizedRecord>>,
         rx: mpsc::Receiver<Vec<Record>>,
         rules: Rules,
-        sanitizer: InMemorySanitizer,
+        sanitizer: PersistentSanitizer,
     ) -> Result<(), SanitizeError> {
         let sanitizer: Box<dyn Sanitizer> = Box::new(sanitizer);
         sanitize_task(tx, rx, rules, sanitizer).await

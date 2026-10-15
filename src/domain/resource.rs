@@ -191,6 +191,15 @@ impl SanitizeType {
             _ => Err(()),
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Email => "email",
+            Self::PhoneNumber => "phone_number",
+            Self::Ssn => "ssn",
+        }
+    }
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -216,6 +225,10 @@ impl FieldIdentifierValue {
         Self(Self::to_cache_key(value))
     }
 
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     fn to_cache_key(value: Value) -> String {
         match value {
             Value::Null => String::new(),
@@ -231,6 +244,7 @@ impl FieldIdentifierValue {
 // We can turn this into Arc to avoid Clone
 pub struct Rules {
     rule_id: Uuid,
+    persistent_key_id: Uuid,
     force_pull_from_start: bool,
     source_naming_convention: NamingConvention,
     target_naming_convention: NamingConvention,
@@ -239,7 +253,11 @@ pub struct Rules {
 }
 
 impl Rules {
-    pub(crate) fn from_stored(rule_id: Uuid, value: &Value) -> Result<Self, ()> {
+    pub(crate) fn from_stored(
+        rule_id: Uuid,
+        persistent_key_id: Uuid,
+        value: &Value,
+    ) -> Result<Self, ()> {
         let force_pull_from_start = value
             .get("force_pull_from_start")
             .and_then(Value::as_bool)
@@ -284,6 +302,7 @@ impl Rules {
         }
         Ok(Self {
             rule_id,
+            persistent_key_id,
             force_pull_from_start,
             source_naming_convention,
             target_naming_convention,
@@ -297,6 +316,10 @@ impl Rules {
     }
     pub fn get_rule_id(&self) -> &Uuid {
         &self.rule_id
+    }
+
+    pub fn get_persistent_key_id(&self) -> &Uuid {
+        &self.persistent_key_id
     }
 
     pub fn get_source_identifier(&self) -> &FieldIdentifierKey {

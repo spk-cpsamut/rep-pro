@@ -31,10 +31,18 @@ pub(crate) trait Dao: Send + Sync {
         pair: &PairConfig,
     ) -> Result<Uuid, (StatusCode, &'static str)>;
 
+    async fn find_persistent_key(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        resource_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Uuid>, sqlx::Error>;
+
     async fn insert_rule(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         resource_map_id: Uuid,
+        persistent_key_id: Uuid,
         rule: Value,
     ) -> Result<Uuid, (StatusCode, &'static str)>;
 
@@ -67,9 +75,11 @@ impl Dao for ResourceMapDao {
     }
 
     async fn list_rules(&self) -> Result<Vec<RuleRow>, sqlx::Error> {
-        sqlx::query_as("SELECT id, resource_map_id, rule FROM rules ORDER BY created_at ASC")
-            .fetch_all(&self.pool)
-            .await
+        sqlx::query_as(
+            "SELECT id, resource_map_id, persistent_key_id, rule FROM rules ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
     }
 
     async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
@@ -109,18 +119,35 @@ impl Dao for ResourceMapDao {
         .map_err(map_db_error)
     }
 
+    async fn find_persistent_key(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        resource_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        sqlx::query_scalar("SELECT id FROM persistent_keys WHERE resource_id = $1 AND name = $2")
+            .bind(resource_id)
+            .bind(name)
+            .fetch_optional(&mut **tx)
+            .await
+    }
+
     async fn insert_rule(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         resource_map_id: Uuid,
+        persistent_key_id: Uuid,
         rule: Value,
     ) -> Result<Uuid, (StatusCode, &'static str)> {
-        sqlx::query_scalar("INSERT INTO rules (resource_map_id, rule) VALUES ($1, $2) RETURNING id")
-            .bind(resource_map_id)
-            .bind(SqlxJson(rule))
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(map_db_error)
+        sqlx::query_scalar(
+            "INSERT INTO rules (resource_map_id, persistent_key_id, rule) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(resource_map_id)
+        .bind(persistent_key_id)
+        .bind(SqlxJson(rule))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(map_db_error)
     }
 
     async fn commit(&self, tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), sqlx::Error> {
@@ -142,6 +169,7 @@ pub(crate) struct ResourceMapRow {
 pub(crate) struct RuleRow {
     pub id: Uuid,
     pub resource_map_id: Uuid,
+    pub persistent_key_id: Uuid,
     pub rule: SqlxJson<Value>,
 }
 

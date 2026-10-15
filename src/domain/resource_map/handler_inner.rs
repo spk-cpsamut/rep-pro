@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use axum::http::StatusCode;
 use serde_json::Value;
@@ -10,8 +9,9 @@ use crate::domain::orchestrator::{OrchestratorError, ParallelOrchestrator};
 use crate::domain::resource::postgres_resource::fetch_sample_row;
 use crate::domain::resource::{Record, Rules, connect_resource, load_postgres_resource};
 use crate::domain::resource_map::{PairConfig, ResourceMap};
-use crate::domain::sanitizer::Sanitizer;
-use crate::domain::sanitizer::in_memory_sanitizer::{InMemorySanitizer, SanitizeStorage};
+use crate::domain::sanitizer::persistent_sanitizer::{
+    PersistentSanitizer, PostgresValueMappingStore,
+};
 use crate::domain::state::AppState;
 use crate::infrastructure::persistence::PostgresResourceMapStore;
 
@@ -108,9 +108,20 @@ pub(crate) async fn create_resource_map(
 
     let mut rule_ids = Vec::with_capacity(req.rules.len());
     for rule in &req.rules {
+        let persistent_key_id = state
+            .resource_maps
+            .find_persistent_key(&mut tx, req.resource_source, &rule.persistent_key)
+            .await
+            .map_err(|_| internal_error())?
+            .ok_or((StatusCode::BAD_REQUEST, "persistent key not found"))?;
         let rule_id = state
             .resource_maps
-            .insert_rule(&mut tx, resource_map_id, stored_rule(rule))
+            .insert_rule(
+                &mut tx,
+                resource_map_id,
+                persistent_key_id,
+                stored_rule(rule),
+            )
             .await?;
         rule_ids.push(rule_id);
     }
@@ -131,7 +142,7 @@ pub(crate) async fn preview_sanitize(
     id: Uuid,
 ) -> Result<SanitizePreview, (StatusCode, &'static str)> {
     let prepared = prepare_sanitize(state, id).await?;
-    let sanitizer = fresh_sanitizer();
+    let sanitizer = persistent_sanitizer(state);
     examples_for(&prepared, &sanitizer).await
 }
 
@@ -143,9 +154,7 @@ pub(crate) async fn run_sanitize(
     if !valid_table(&prepared.table_target) {
         return Err((StatusCode::BAD_REQUEST, "invalid table_target"));
     }
-    let sanitizer = fresh_sanitizer();
-    let preview = examples_for(&prepared, &sanitizer).await?;
-
+    let sanitizer = persistent_sanitizer(state);
     let source =
         load_postgres_resource(state, prepared.resource_source, &prepared.table_source).await?;
     let target =
@@ -167,7 +176,7 @@ pub(crate) async fn run_sanitize(
             .await
             .map_err(orchestrator_error)?;
     }
-    Ok(preview)
+    examples_for(&prepared, &sanitizer).await
 }
 
 struct PreparedSanitize {
@@ -210,8 +219,8 @@ async fn prepare_sanitize(
 
     let mut rules = Vec::with_capacity(map.rules.len());
     for entry in &map.rules {
-        let parsed =
-            Rules::from_stored(entry.rule_id, &entry.rule).map_err(|_| internal_error())?;
+        let parsed = Rules::from_stored(entry.rule_id, entry.persistent_key_id, &entry.rule)
+            .map_err(|_| internal_error())?;
         require_ident(
             &parsed
                 .get_source_identifier()
@@ -251,15 +260,15 @@ async fn prepare_sanitize(
     })
 }
 
-fn fresh_sanitizer() -> InMemorySanitizer {
-    InMemorySanitizer::new(Mutex::new(SanitizeStorage {
-        map: HashMap::new(),
-    }))
+fn persistent_sanitizer(state: &AppState) -> PersistentSanitizer {
+    PersistentSanitizer::new(PostgresValueMappingStore::new(
+        state.resource_maps.pool().clone(),
+    ))
 }
 
 async fn examples_for(
     prepared: &PreparedSanitize,
-    sanitizer: &InMemorySanitizer,
+    sanitizer: &PersistentSanitizer,
 ) -> Result<SanitizePreview, (StatusCode, &'static str)> {
     let mut examples = Vec::with_capacity(prepared.rules.len());
     for rules in &prepared.rules {
@@ -274,7 +283,7 @@ async fn examples_for(
 async fn preview_rule(
     rules: Rules,
     row: &Value,
-    sanitizer: &InMemorySanitizer,
+    sanitizer: &PersistentSanitizer,
 ) -> Result<SanitizeExample, (StatusCode, &'static str)> {
     let rule_id = *rules.get_rule_id();
     let field_names: Vec<String> = rules
@@ -283,7 +292,7 @@ async fn preview_rule(
         .map(|field| field.get_field_name().to_owned())
         .collect();
     let sanitized = sanitizer
-        .sanitize(vec![Record::from_value(row.clone())], rules)
+        .preview(vec![Record::from_value(row.clone())], rules)
         .await
         .map_err(|_| internal_error())?;
     let after = sanitized.into_iter().next().ok_or(internal_error())?;
@@ -352,6 +361,9 @@ fn validate_map_request(req: &CreateResourceMapRequest) -> Result<(), (StatusCod
         if !is_safe_ident(&rule.source_identifier) {
             return Err((StatusCode::BAD_REQUEST, "invalid source identifier"));
         }
+        if rule.persistent_key.len() > MAX_IDENT || !is_safe_ident(&rule.persistent_key) {
+            return Err((StatusCode::BAD_REQUEST, "invalid persistent key"));
+        }
         if rule.fields.is_empty() {
             return Err((StatusCode::BAD_REQUEST, "each rule needs a field"));
         }
@@ -392,6 +404,7 @@ mod tests {
                 source_naming_convention: "snake_case".into(),
                 target_naming_convention: "snake_case".into(),
                 source_identifier: "id".into(),
+                persistent_key: "customer".into(),
                 fields: vec![FieldRequest {
                     field_name: "email".into(),
                     sanitize_type: "email".into(),
@@ -413,6 +426,7 @@ mod tests {
     fn stored_rule_uses_domain_field_names() {
         let rule = stored_rule(&sample_request().rules[0]);
         assert_eq!(rule["source_identifier"], "id");
+        assert_eq!(rule["persistent_key"], "customer");
         assert_eq!(rule["source_naming_convention"], "snake_case");
         assert_eq!(rule["source_sanitize_fields"][0]["field_name"], "email");
         assert_eq!(rule["source_sanitize_fields"][0]["sanitize_type"], "email");
@@ -438,6 +452,13 @@ mod tests {
             validate_map_request(&req).unwrap_err().1,
             "invalid table_source"
         );
+
+        req = sample_request();
+        req.rules[0].persistent_key = "not a key".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid persistent key"
+        );
     }
 
     #[tokio::test]
@@ -445,6 +466,7 @@ mod tests {
         let rule_id = Uuid::from_u128(1);
         let rule = Rules::from_stored(
             rule_id,
+            Uuid::from_u128(2),
             &serde_json::json!({
                 "force_pull_from_start": false,
                 "source_naming_convention": "snake_case",
@@ -457,7 +479,9 @@ mod tests {
             }),
         )
         .unwrap();
-        let sanitizer = fresh_sanitizer();
+        let sanitizer = PersistentSanitizer::new(
+            crate::domain::sanitizer::persistent_sanitizer::MemoryValueMappingStore::default(),
+        );
         let row = serde_json::json!({
             "id": "42",
             "email": "jane@acme.com",

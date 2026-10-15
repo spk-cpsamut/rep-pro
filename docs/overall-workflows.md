@@ -28,13 +28,13 @@ Given that configuration, the service is responsible for:
 
 ### Consistent mapping
 
-For any given source value, the sanitized target value must be **stable across every sanitization run**. For example, if the source contains the name `John` and it is first sanitized to `Foo`, then every future run — for the same rule, on the same column — must also produce `Foo` for `John`. The same source value never produces two different target values, and two different source values never collide onto the same target value within a rule.
+For any given source row, the sanitized target values must be **stable across every sanitization run and across links that share a persistent key**. Each source resource owns named persistent keys. A rule names one of those keys. The lookup is the row's source identifier (for example user id `42`) plus the sanitize type. If that identity is first sanitized to the name `Foo`, every later run — and every other link from the same source that reuses the key — must also produce `Foo` for that id. Two columns of the same sanitize type on one row share one stored value. Two different row identities never share a target value for the same sanitize type under one key.
 
 This guarantee is what keeps the sanitized target usable: joins, foreign keys, deduplication, and longitudinal analytics on the target only stay valid if the source-to-target value mapping is deterministic over time.
 
-Because the sanitization logic itself (e.g. random pseudonymization) is not generally reproducible from the source value alone, the service must **persist the value mappings it has already produced** and look them up before generating a new one. Conceptually:
+Because the sanitization logic itself (e.g. random pseudonymization) is not generally reproducible from the source row alone, the service must **persist the value mappings it has already produced** and look them up before generating a new one. Conceptually:
 
-- On first encounter of a source value under a rule, the service generates a target value via the rule's logic and stores `(rule, source_value) → target_value`.
+- On first encounter of a row identity for a sanitize type under a persistent key, the service generates a target value and stores `(persistent_key, source_identity, sanitize_type) → target_value`.
 - On every subsequent encounter, the service returns the previously stored target value instead of generating a new one.
 
 This is reflected in the [ER diagram](#er-diagram) by the `value_mapping` entity.
@@ -122,27 +122,40 @@ erDiagram
         VARCHAR255 table_target
     }
 
+    persistent_key {
+        UUID id PK
+        UUID resource_id FK
+        VARCHAR255 name
+        TIMESTAMP_WITH_TZ created_at
+        TIMESTAMP_WITH_TZ updated_at
+    }
+
     rule {
         UUID id PK
         UUID resource_map_id FK
+        UUID persistent_key_id FK
         JSONB rule
     }
 
     value_mapping {
         UUID id PK
-        UUID rule_id FK
-        TEXT source_value
+        UUID persistent_key_id FK
+        TEXT source_identity
+        TEXT sanitize_type
         TEXT target_value
         TIMESTAMP_WITH_TZ created_at
     }
 
-    resource     }o--o{ resource_map  : source
-    resource     }o--o{ resource_map  : target
-    resource_map ||--|{ rule          : has
-    rule         ||--o{ value_mapping : produces
+    resource     }o--o{ resource_map    : source
+    resource     }o--o{ resource_map    : target
+    resource     ||--o{ persistent_key  : owns
+    resource_map ||--|{ rule            : has
+    persistent_key ||--o{ rule          : used_by
+    persistent_key ||--o{ value_mapping : stores
 ```
 
 > **Notes:**
 >
-> - `value_mapping` should enforce a uniqueness constraint on `(rule_id, source_value)` so that the consistent mapping guarantee holds at the storage layer (one source value per rule maps to exactly one target value).
+> - `persistent_key.name` is unique per source resource, so two sources can both have a key named `customer`.
+> - `value_mapping` enforces a uniqueness constraint on `(persistent_key_id, source_identity, sanitize_type)` so that the consistent mapping guarantee holds at the storage layer.
 > - `resource_map.pair_config` is the pull strategy plus pointer for that pair. A successful sanitization run updates it via `sync_up_config`; it is not stored on the resource itself.

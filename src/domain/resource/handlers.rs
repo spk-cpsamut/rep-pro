@@ -11,12 +11,18 @@ use crate::domain::http::bad_request;
 use crate::domain::state::AppState;
 
 use super::handler_inner;
-use super::models::{ColumnMeta, CreatedResource, ResourceSummary};
+use super::models::{
+    ColumnMeta, CreatedPersistentKey, CreatedResource, PersistentKeySummary, ResourceSummary,
+};
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/resources", get(list_resources).post(create_resource))
         .route("/resources/{id}/columns", get(list_columns))
+        .route(
+            "/resources/{id}/persistent-keys",
+            get(list_persistent_keys).post(create_persistent_key),
+        )
 }
 
 #[derive(Deserialize)]
@@ -44,6 +50,25 @@ async fn list_columns(
     handler_inner::list_columns(&state, id, &query.schema, &query.table)
         .await
         .map(Json)
+}
+
+async fn list_persistent_keys(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<PersistentKeySummary>>, (StatusCode, &'static str)> {
+    handler_inner::list_persistent_keys(&state, id)
+        .await
+        .map(Json)
+}
+
+async fn create_persistent_key(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<CreatedPersistentKey>), (StatusCode, &'static str)> {
+    let req = serde_json::from_slice(&body).map_err(|_| bad_request())?;
+    let created = handler_inner::create_persistent_key(&state, id, req).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn create_resource(
