@@ -175,9 +175,14 @@ fn is_safe_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::bind_json_value;
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use sqlx::postgres::PgPoolOptions;
     use sqlx::{Postgres, QueryBuilder};
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    use super::{bind_json_value, is_safe_ident, is_safe_type_name, push_task};
+    use crate::domain::resource::{PushError, Rules, SanitizedRecord};
 
     #[test]
     fn text_values_are_cast_to_the_target_column_type() {
@@ -202,5 +207,91 @@ mod tests {
             qb.sql(),
             "INSERT INTO users (id, name) VALUES ($1::uuid, $2::character varying)"
         );
+    }
+
+    fn sql_for(value: &Value, column_type: &str) -> String {
+        let mut qb = QueryBuilder::<Postgres>::new("INSERT INTO t (c) ");
+        qb.push_values(std::iter::once(value), |mut b, value| {
+            bind_json_value(&mut b, value, column_type);
+        });
+        qb.sql().to_owned()
+    }
+
+    #[test]
+    fn each_json_kind_is_bound_for_its_column_type() {
+        assert_eq!(
+            sql_for(&Value::Null, "int4"),
+            "INSERT INTO t (c) VALUES (NULL)"
+        );
+        assert_eq!(
+            sql_for(&json!(true), "bool"),
+            "INSERT INTO t (c) VALUES ($1::bool)"
+        );
+        assert_eq!(
+            sql_for(&json!(7), "int8"),
+            "INSERT INTO t (c) VALUES ($1::int8)"
+        );
+        assert_eq!(
+            sql_for(&json!(u64::MAX), "int8"),
+            "INSERT INTO t (c) VALUES ($1::int8)"
+        );
+        assert_eq!(
+            sql_for(&json!(1.5), "float8"),
+            "INSERT INTO t (c) VALUES ($1::float8)"
+        );
+        assert_eq!(
+            sql_for(&json!("Ava"), "text"),
+            "INSERT INTO t (c) VALUES ($1::text)"
+        );
+        assert_eq!(
+            sql_for(&json!([1]), "jsonb"),
+            "INSERT INTO t (c) VALUES ($1::jsonb)"
+        );
+        assert_eq!(
+            sql_for(&json!({"a": 1}), "jsonb"),
+            "INSERT INTO t (c) VALUES ($1::jsonb)"
+        );
+    }
+
+    #[test]
+    fn ident_and_type_name_reject_empty_and_unsafe_characters() {
+        assert!(!is_safe_ident(""));
+        assert!(!is_safe_ident("1id"));
+        assert!(is_safe_ident("_id"));
+        assert!(!is_safe_type_name(""));
+        assert!(is_safe_type_name("timestamp with time zone"));
+        assert!(!is_safe_type_name("int;drop"));
+    }
+
+    fn rules(identifier: &str) -> Rules {
+        Rules::from_stored(
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            &json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": identifier,
+                "source_sanitize_fields": []
+            }),
+        )
+        .unwrap()
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn push_rejects_an_unsafe_table_or_conflict_field_before_querying() {
+        let (_tx, rx) = mpsc::channel::<Vec<SanitizedRecord>>(1);
+        let unsafe_table = push_task("bad-table".into(), lazy_pool(), rules("id"), rx).await;
+        assert!(matches!(unsafe_table, Err(PushError::UnexpectedFailed)));
+
+        let (_tx, rx) = mpsc::channel::<Vec<SanitizedRecord>>(1);
+        let unsafe_field = push_task("users".into(), lazy_pool(), rules("bad-id"), rx).await;
+        assert!(matches!(unsafe_field, Err(PushError::UnexpectedFailed)));
     }
 }

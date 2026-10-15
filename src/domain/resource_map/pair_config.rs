@@ -124,3 +124,104 @@ pub enum PairConfigJsonError {
     UnknownStrategy,
     InvalidCheckpoint,
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{PairConfig, PairConfigJsonError, PullBatchStrategy};
+
+    #[test]
+    fn rejects_json_that_is_not_a_pair_config() {
+        assert!(matches!(
+            PairConfig::from_json(json!("cursor")),
+            Err(PairConfigJsonError::InvalidJson)
+        ));
+        assert!(matches!(
+            PairConfig::from_json(json!({})),
+            Err(PairConfigJsonError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn round_trips_cursor_with_and_without_a_checkpoint() {
+        for checkpoint in [json!(null), json!("42")] {
+            let value = json!({
+                "pull_batch_strategy": "cursor",
+                "pull_batch_field": "id",
+                "pull_batch_checkpoint": checkpoint,
+            });
+            let Ok(pair) = PairConfig::from_json(value.clone()) else {
+                panic!("cursor pair config");
+            };
+            assert_eq!(pair.to_json(), value);
+            match pair.pull_batch_strategy() {
+                PullBatchStrategy::Cursor { field, pointer } => {
+                    assert_eq!(field, "id");
+                    assert_eq!(pointer.as_deref(), checkpoint.as_str());
+                }
+                PullBatchStrategy::LimitOffSet { .. } => panic!("expected cursor"),
+            }
+        }
+    }
+
+    #[test]
+    fn round_trips_limit_offset_with_and_without_a_checkpoint() {
+        let open = json!({
+            "pull_batch_strategy": "LimitOffSet",
+            "pull_batch_field": "id",
+            "pull_batch_checkpoint": null,
+        });
+        let Ok(pair) = PairConfig::from_json(open.clone()) else {
+            panic!("open limit offset");
+        };
+        assert_eq!(pair.to_json(), open);
+        match pair.pull_batch_strategy() {
+            PullBatchStrategy::LimitOffSet { field, offset } => {
+                assert_eq!(field, "id");
+                assert!(offset.is_none());
+            }
+            PullBatchStrategy::Cursor { .. } => panic!("expected limit offset"),
+        }
+
+        let saved = json!({
+            "pull_batch_strategy": "LimitOffSet",
+            "pull_batch_field": "id",
+            "pull_batch_checkpoint": "12",
+        });
+        let Ok(pair) = PairConfig::from_json(saved.clone()) else {
+            panic!("saved limit offset");
+        };
+        assert_eq!(pair.to_json(), saved);
+        match pair.pull_batch_strategy() {
+            PullBatchStrategy::LimitOffSet { field, offset } => {
+                assert_eq!(field, "id");
+                assert_eq!(offset.as_ref().unwrap().get(), 12);
+            }
+            PullBatchStrategy::Cursor { .. } => panic!("expected limit offset"),
+        }
+    }
+
+    #[test]
+    fn rejects_an_unknown_strategy_and_a_bad_checkpoint() {
+        let unknown = json!({
+            "pull_batch_strategy": "offset",
+            "pull_batch_field": "id",
+            "pull_batch_checkpoint": null,
+        });
+        assert!(matches!(
+            PairConfig::from_json(unknown),
+            Err(PairConfigJsonError::UnknownStrategy)
+        ));
+
+        let bad_checkpoint = json!({
+            "pull_batch_strategy": "LimitOffSet",
+            "pull_batch_field": "id",
+            "pull_batch_checkpoint": "nope",
+        });
+        assert!(matches!(
+            PairConfig::from_json(bad_checkpoint),
+            Err(PairConfigJsonError::InvalidCheckpoint)
+        ));
+    }
+}

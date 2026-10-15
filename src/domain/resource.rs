@@ -372,3 +372,175 @@ mod errors {
         MapNotFound,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    use super::{FieldIdentifierValue, NamingConvention, Record, Rules, SanitizeType};
+
+    fn stored() -> Value {
+        json!({
+            "force_pull_from_start": true,
+            "source_naming_convention": "snake_case",
+            "target_naming_convention": "camel_case",
+            "source_identifier": "id",
+            "source_sanitize_fields": [{
+                "field_name": "email",
+                "sanitize_type": "email"
+            }]
+        })
+    }
+
+    fn parse(value: &Value) -> Result<Rules, ()> {
+        Rules::from_stored(Uuid::from_u128(1), Uuid::from_u128(2), value)
+    }
+
+    fn without(key: &str) -> Value {
+        let mut value = stored();
+        value.as_object_mut().unwrap().remove(key);
+        value
+    }
+
+    fn with(key: &str, replacement: Value) -> Value {
+        let mut value = stored();
+        value[key] = replacement;
+        value
+    }
+
+    fn with_field(field: Value) -> Value {
+        with("source_sanitize_fields", json!([field]))
+    }
+
+    #[test]
+    fn parses_every_naming_convention() {
+        assert!(matches!(
+            NamingConvention::parse("camel_case"),
+            Ok(NamingConvention::CamelCase)
+        ));
+        assert!(matches!(
+            NamingConvention::parse("pascal_case"),
+            Ok(NamingConvention::PascalCase)
+        ));
+        assert!(matches!(
+            NamingConvention::parse("snake_case"),
+            Ok(NamingConvention::SnakeCase)
+        ));
+        assert!(matches!(
+            NamingConvention::parse("screaming_case"),
+            Ok(NamingConvention::ScreamingCase)
+        ));
+        assert!(matches!(
+            NamingConvention::parse("kebab_case"),
+            Ok(NamingConvention::KebabCase)
+        ));
+        assert!(matches!(
+            NamingConvention::parse("train_case"),
+            Ok(NamingConvention::TrainCase)
+        ));
+        assert!(NamingConvention::parse("title_case").is_err());
+    }
+
+    #[test]
+    fn parses_every_sanitize_type() {
+        assert!(matches!(
+            SanitizeType::parse("name"),
+            Ok(SanitizeType::Name)
+        ));
+        assert!(matches!(
+            SanitizeType::parse("email"),
+            Ok(SanitizeType::Email)
+        ));
+        assert!(matches!(
+            SanitizeType::parse("phone_number"),
+            Ok(SanitizeType::PhoneNumber)
+        ));
+        assert!(matches!(SanitizeType::parse("ssn"), Ok(SanitizeType::Ssn)));
+        assert!(SanitizeType::parse("address").is_err());
+        assert_eq!(SanitizeType::Name.as_str(), "name");
+        assert_eq!(SanitizeType::Email.as_str(), "email");
+        assert_eq!(SanitizeType::PhoneNumber.as_str(), "phone_number");
+        assert_eq!(SanitizeType::Ssn.as_str(), "ssn");
+    }
+
+    #[test]
+    fn reads_a_complete_stored_rule() {
+        let rules = parse(&stored()).unwrap();
+        assert!(rules.force_pull_from_start);
+        assert!(matches!(
+            rules.source_naming_convention,
+            NamingConvention::SnakeCase
+        ));
+        assert!(matches!(
+            rules.target_naming_convention,
+            NamingConvention::CamelCase
+        ));
+        assert_eq!(
+            rules
+                .get_source_identifier()
+                .get_field_identifer_as_string(),
+            "id"
+        );
+        assert_eq!(rules.get_rule_id(), &Uuid::from_u128(1));
+        assert_eq!(rules.get_persistent_key_id(), &Uuid::from_u128(2));
+        let field = &rules.get_source_field()[0];
+        assert_eq!(field.get_field_name(), "email");
+        assert!(matches!(field.get_sanitize_type(), SanitizeType::Email));
+    }
+
+    #[test]
+    fn rejects_each_incomplete_stored_rule() {
+        let cases = [
+            without("force_pull_from_start"),
+            with("force_pull_from_start", json!("yes")),
+            without("source_naming_convention"),
+            with("source_naming_convention", json!("title_case")),
+            with("source_naming_convention", json!(1)),
+            without("target_naming_convention"),
+            with("target_naming_convention", json!("title_case")),
+            with("target_naming_convention", json!(1)),
+            without("source_identifier"),
+            with("source_identifier", json!(1)),
+            without("source_sanitize_fields"),
+            with("source_sanitize_fields", json!({})),
+            with_field(json!({"sanitize_type": "email"})),
+            with_field(json!({"field_name": 1, "sanitize_type": "email"})),
+            with_field(json!({"field_name": "email"})),
+            with_field(json!({"field_name": "email", "sanitize_type": "address"})),
+            with_field(json!({"field_name": "email", "sanitize_type": 1})),
+            with_field(json!(1)),
+        ];
+        for value in cases {
+            assert!(parse(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn missing_identifier_and_non_object_records() {
+        let rules = parse(&stored()).unwrap();
+        let missing = Record::from_value(json!({"email": "a@b.c"}));
+        assert_eq!(missing.get_identifier_val(&rules), Value::Null);
+        assert_eq!(missing.fields().len(), 1);
+
+        let not_an_object = Record::from_value(json!([1, 2]));
+        assert!(not_an_object.fields().is_empty());
+        assert_eq!(not_an_object.get_identifier_val(&rules), Value::Null);
+    }
+
+    #[test]
+    fn cache_key_covers_every_json_kind() {
+        assert_eq!(FieldIdentifierValue::to_cache_key(Value::Null), "");
+        assert_eq!(FieldIdentifierValue::to_cache_key(json!(true)), "true");
+        assert_eq!(FieldIdentifierValue::to_cache_key(json!(42)), "42");
+        assert_eq!(FieldIdentifierValue::to_cache_key(json!("abc")), "abc");
+        assert_eq!(
+            FieldIdentifierValue::to_cache_key(json!([1, true])),
+            "[1,true]"
+        );
+        assert_eq!(
+            FieldIdentifierValue::to_cache_key(json!({"z": true})),
+            r#"{"z":true}"#
+        );
+    }
+}

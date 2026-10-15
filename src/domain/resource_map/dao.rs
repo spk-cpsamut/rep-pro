@@ -190,3 +190,17 @@ fn map_db_error(err: sqlx::Error) -> (StatusCode, &'static str) {
         _ => internal_error(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::map_db_error;
+
+    #[test]
+    fn a_non_database_error_is_internal() {
+        let (status, message) = map_db_error(sqlx::Error::PoolClosed);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(message, "internal server error");
+    }
+}

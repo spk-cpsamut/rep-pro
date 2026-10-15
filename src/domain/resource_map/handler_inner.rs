@@ -503,4 +503,233 @@ mod tests {
                 .is_some_and(|email| email.contains('@'))
         );
     }
+
+    #[test]
+    fn accepts_a_complete_map_request() {
+        assert!(validate_map_request(&sample_request()).is_ok());
+    }
+
+    #[test]
+    fn rejects_each_invalid_map_field() {
+        let mut req = sample_request();
+        req.table_target = "users-out".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid table_target"
+        );
+
+        req = sample_request();
+        req.table_source = "a".repeat(MAX_IDENT + 1);
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid table_source"
+        );
+
+        req = sample_request();
+        req.pair_config.pull_batch_field = "bad field".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid pull field"
+        );
+
+        req = sample_request();
+        req.rules[0].source_naming_convention = "title_case".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid naming convention"
+        );
+
+        req = sample_request();
+        req.rules[0].target_naming_convention = "title_case".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid naming convention"
+        );
+
+        req = sample_request();
+        req.rules[0].source_identifier = "bad id".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid source identifier"
+        );
+
+        req = sample_request();
+        req.rules[0].persistent_key = "a".repeat(MAX_IDENT + 1);
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid persistent key"
+        );
+
+        req = sample_request();
+        req.rules[0].fields.clear();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "each rule needs a field"
+        );
+
+        req = sample_request();
+        req.rules[0].fields[0].field_name = "bad name".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid field name"
+        );
+
+        req = sample_request();
+        req.rules[0].fields[0].sanitize_type = "address".into();
+        assert_eq!(
+            validate_map_request(&req).unwrap_err().1,
+            "invalid sanitize type"
+        );
+    }
+
+    #[test]
+    fn require_ident_checks_charset_and_length() {
+        assert!(require_ident("id", "invalid source identifier").is_ok());
+        assert_eq!(
+            require_ident("", "invalid source identifier")
+                .unwrap_err()
+                .1,
+            "invalid source identifier"
+        );
+        assert_eq!(
+            require_ident("1id", "invalid source identifier")
+                .unwrap_err()
+                .1,
+            "invalid source identifier"
+        );
+        assert!(require_ident(&"a".repeat(MAX_IDENT), "invalid source identifier").is_ok());
+        assert_eq!(
+            require_ident(&"a".repeat(MAX_IDENT + 1), "invalid source identifier")
+                .unwrap_err()
+                .1,
+            "invalid source identifier"
+        );
+    }
+
+    #[test]
+    fn limit_offset_pair_config_is_accepted() {
+        let mut req = sample_request();
+        req.pair_config.pull_batch_strategy = "LimitOffSet".into();
+        let pair = pair_config_for_insert(&req.pair_config).unwrap();
+        assert_eq!(pair.to_json()["pull_batch_strategy"], "LimitOffSet");
+        assert_eq!(pair.to_json()["pull_batch_checkpoint"], Value::Null);
+    }
+
+    #[test]
+    fn stored_rule_keeps_force_pull_and_every_field() {
+        let mut rule = sample_request().rules.remove(0);
+        rule.force_pull_from_start = true;
+        rule.fields.push(FieldRequest {
+            field_name: "phone".into(),
+            sanitize_type: "phone_number".into(),
+        });
+        let stored = stored_rule(&rule);
+        assert_eq!(stored["force_pull_from_start"], true);
+        assert_eq!(stored["source_sanitize_fields"][0]["field_name"], "email");
+        assert_eq!(stored["source_sanitize_fields"][1]["field_name"], "phone");
+        assert_eq!(
+            stored["source_sanitize_fields"][1]["sanitize_type"],
+            "phone_number"
+        );
+    }
+
+    #[test]
+    fn orchestrator_errors_map_to_client_messages() {
+        assert_eq!(
+            orchestrator_error(OrchestratorError::DownstreamNotAllowed),
+            (StatusCode::BAD_REQUEST, "source does not allow downstream")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::UpstreamNotAllowed),
+            (StatusCode::BAD_REQUEST, "target does not allow upstream")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::SourceConnectionFailed),
+            (StatusCode::BAD_REQUEST, "cannot connect to database")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::TargetConnectionFailed),
+            (StatusCode::BAD_REQUEST, "cannot connect to database")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::PullFailed),
+            (StatusCode::BAD_REQUEST, "cannot query table")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::SanitizeFailed),
+            (StatusCode::BAD_REQUEST, "sanitize failed")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::PushFailed),
+            (StatusCode::BAD_REQUEST, "cannot write to target")
+        );
+        assert_eq!(
+            orchestrator_error(OrchestratorError::SyncUpConfigFailed),
+            internal_error()
+        );
+    }
+
+    #[test]
+    fn overlay_fills_missing_fields_and_ignores_a_non_object_row() {
+        let sanitized = serde_json::json!({"email": "new@x.com"});
+        let from_array = overlay_sanitized(&serde_json::json!([1]), &sanitized, &["email".into()]);
+        assert_eq!(from_array, serde_json::json!({"email": "new@x.com"}));
+
+        let row = serde_json::json!({"id": "1", "email": "old@x.com"});
+        let missing = overlay_sanitized(&row, &serde_json::json!({"id": "1"}), &["email".into()]);
+        assert_eq!(missing["email"], Value::Null);
+        assert_eq!(missing["id"], "1");
+
+        let copied = overlay_sanitized(&row, &sanitized, &["email".into()]);
+        assert_eq!(copied["email"], "new@x.com");
+        assert_eq!(copied["id"], "1");
+    }
+
+    #[tokio::test]
+    async fn preview_rule_reports_a_store_failure() {
+        use std::collections::HashMap;
+
+        use crate::domain::sanitizer::SanitizerError;
+        use crate::domain::sanitizer::persistent_sanitizer::{MappingWrite, ValueMappingStore};
+
+        struct StoreDown;
+
+        #[async_trait::async_trait]
+        impl ValueMappingStore for StoreDown {
+            async fn load(
+                &self,
+                _persistent_key_id: Uuid,
+                _identities: &[String],
+            ) -> Result<HashMap<(String, String), String>, SanitizerError> {
+                Err(SanitizerError::StoreFailed)
+            }
+
+            async fn insert_missing(
+                &self,
+                _persistent_key_id: Uuid,
+                _rows: &[MappingWrite],
+            ) -> Result<(), SanitizerError> {
+                Ok(())
+            }
+        }
+
+        let rule = Rules::from_stored(
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            &serde_json::json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": "id",
+                "source_sanitize_fields": [{
+                    "field_name": "email",
+                    "sanitize_type": "email"
+                }]
+            }),
+        )
+        .unwrap();
+        let sanitizer = PersistentSanitizer::new(StoreDown);
+        let err = preview_rule(rule, &serde_json::json!({"id": "1"}), &sanitizer).await;
+        assert!(matches!(err, Err(got) if got == internal_error()));
+    }
 }

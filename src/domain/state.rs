@@ -22,3 +22,16 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) fn idle_state() -> AppState {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://localhost/unused")
+        .expect("lazy pool");
+    let config = aws_sdk_kms::Config::builder()
+        .behavior_version(aws_sdk_kms::config::BehaviorVersion::latest())
+        .region(aws_sdk_kms::config::Region::new("us-east-1"))
+        .credentials_provider(aws_sdk_kms::config::Credentials::for_tests())
+        .build();
+    AppState::new(pool, Client::from_conf(config), "key".into())
+}

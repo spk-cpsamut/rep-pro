@@ -263,7 +263,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{MemoryValueMappingStore, PersistentSanitizer};
+    use super::{
+        MappingWrite, MemoryValueMappingStore, PersistentSanitizer, PostgresValueMappingStore,
+        ValueMappingStore,
+    };
     use crate::domain::resource::{Record, Rules};
     use crate::domain::sanitizer::Sanitizer;
 
@@ -367,5 +370,244 @@ mod tests {
             .expect("sanitize again");
         assert_eq!(stored[0]["name"], again[0]["name"]);
         assert_eq!(store.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_batch_writes_one_mapping_per_identity() {
+        let store = MemoryValueMappingStore::default();
+        let sanitizer = PersistentSanitizer::new(store.clone());
+        let users = rules(
+            1,
+            Uuid::from_u128(9),
+            json!([{ "field_name": "name", "sanitize_type": "name" }]),
+        );
+        let sanitized = sanitizer
+            .sanitize(
+                vec![
+                    Record::from_value(json!({"id": "42", "name": "Ava"})),
+                    Record::from_value(json!({"id": "42", "name": "Other"})),
+                ],
+                users,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sanitized[0]["name"], sanitized[1]["name"]);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fields_of_the_same_type_share_one_stored_value() {
+        let store = MemoryValueMappingStore::default();
+        let sanitizer = PersistentSanitizer::new(store.clone());
+        let users = rules(
+            1,
+            Uuid::from_u128(9),
+            json!([
+                { "field_name": "name", "sanitize_type": "name" },
+                { "field_name": "full_name", "sanitize_type": "name" }
+            ]),
+        );
+        let sanitized = sanitizer
+            .sanitize(
+                vec![Record::from_value(
+                    json!({"id": "42", "name": "Ava", "full_name": "Ava Martinez"}),
+                )],
+                users,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sanitized[0]["name"], sanitized[0]["full_name"]);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_records_write_nothing() {
+        let store = MemoryValueMappingStore::default();
+        let sanitizer = PersistentSanitizer::new(store.clone());
+        let users = rules(
+            1,
+            Uuid::from_u128(9),
+            json!([{ "field_name": "name", "sanitize_type": "name" }]),
+        );
+        let sanitized = sanitizer.sanitize(vec![], users).await.unwrap();
+        assert!(sanitized.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    struct LoadFail;
+
+    #[async_trait::async_trait]
+    impl ValueMappingStore for LoadFail {
+        async fn load(
+            &self,
+            _persistent_key_id: Uuid,
+            _identities: &[String],
+        ) -> Result<
+            std::collections::HashMap<(String, String), String>,
+            crate::domain::sanitizer::SanitizerError,
+        > {
+            Err(crate::domain::sanitizer::SanitizerError::StoreFailed)
+        }
+
+        async fn insert_missing(
+            &self,
+            _persistent_key_id: Uuid,
+            _rows: &[MappingWrite],
+        ) -> Result<(), crate::domain::sanitizer::SanitizerError> {
+            Ok(())
+        }
+    }
+
+    struct InsertFail;
+
+    #[async_trait::async_trait]
+    impl ValueMappingStore for InsertFail {
+        async fn load(
+            &self,
+            _persistent_key_id: Uuid,
+            _identities: &[String],
+        ) -> Result<
+            std::collections::HashMap<(String, String), String>,
+            crate::domain::sanitizer::SanitizerError,
+        > {
+            Ok(std::collections::HashMap::new())
+        }
+
+        async fn insert_missing(
+            &self,
+            _persistent_key_id: Uuid,
+            _rows: &[MappingWrite],
+        ) -> Result<(), crate::domain::sanitizer::SanitizerError> {
+            Err(crate::domain::sanitizer::SanitizerError::StoreFailed)
+        }
+    }
+
+    struct Forgetful;
+
+    #[async_trait::async_trait]
+    impl ValueMappingStore for Forgetful {
+        async fn load(
+            &self,
+            _persistent_key_id: Uuid,
+            _identities: &[String],
+        ) -> Result<
+            std::collections::HashMap<(String, String), String>,
+            crate::domain::sanitizer::SanitizerError,
+        > {
+            Ok(std::collections::HashMap::new())
+        }
+
+        async fn insert_missing(
+            &self,
+            _persistent_key_id: Uuid,
+            _rows: &[MappingWrite],
+        ) -> Result<(), crate::domain::sanitizer::SanitizerError> {
+            Ok(())
+        }
+    }
+
+    fn one_row() -> Vec<Record> {
+        vec![Record::from_value(json!({"id": "42", "name": "Ava"}))]
+    }
+
+    fn name_rules() -> Rules {
+        rules(
+            1,
+            Uuid::from_u128(9),
+            json!([{ "field_name": "name", "sanitize_type": "name" }]),
+        )
+    }
+
+    #[tokio::test]
+    async fn store_errors_surface_as_store_failed() {
+        let loaded = PersistentSanitizer::new(LoadFail)
+            .sanitize(one_row(), name_rules())
+            .await;
+        assert!(matches!(
+            loaded,
+            Err(crate::domain::sanitizer::SanitizerError::StoreFailed)
+        ));
+
+        let inserted = PersistentSanitizer::new(InsertFail)
+            .sanitize(one_row(), name_rules())
+            .await;
+        assert!(matches!(
+            inserted,
+            Err(crate::domain::sanitizer::SanitizerError::StoreFailed)
+        ));
+
+        let forgotten = PersistentSanitizer::new(Forgetful)
+            .sanitize(one_row(), name_rules())
+            .await;
+        assert!(matches!(
+            forgotten,
+            Err(crate::domain::sanitizer::SanitizerError::StoreFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_store_keeps_the_first_value_and_filters_lookups() {
+        let store = MemoryValueMappingStore::default();
+        let key = Uuid::from_u128(9);
+        let other = Uuid::from_u128(8);
+        store
+            .insert_missing(
+                key,
+                &[MappingWrite {
+                    source_identity: "a".into(),
+                    sanitize_type: "name".into(),
+                    target_value: "first".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .insert_missing(
+                key,
+                &[MappingWrite {
+                    source_identity: "a".into(),
+                    sanitize_type: "name".into(),
+                    target_value: "second".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .insert_missing(
+                other,
+                &[MappingWrite {
+                    source_identity: "a".into(),
+                    sanitize_type: "name".into(),
+                    target_value: "other-key".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .insert_missing(
+                key,
+                &[MappingWrite {
+                    source_identity: "b".into(),
+                    sanitize_type: "name".into(),
+                    target_value: "other-identity".into(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let found = store.load(key, &["a".into()]).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[&("a".into(), "name".into())], "first");
+    }
+
+    #[tokio::test]
+    async fn postgres_store_skips_empty_inputs_without_a_query() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let store = PostgresValueMappingStore::new(pool);
+        let loaded = store.load(Uuid::nil(), &[]).await.unwrap();
+        assert!(loaded.is_empty());
+        store.insert_missing(Uuid::nil(), &[]).await.unwrap();
     }
 }

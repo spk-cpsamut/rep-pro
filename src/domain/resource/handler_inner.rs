@@ -343,3 +343,139 @@ async fn encrypt(state: &AppState, field: &str, plaintext: &[u8]) -> Result<Vec<
         .map(|blob| blob.as_ref().to_vec())
         .ok_or(())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use secrecy::SecretString;
+    use uuid::Uuid;
+
+    use super::super::models::ResourceConfig;
+    use super::{
+        CreatePersistentKeyRequest, CreateResourceRequest, MAX_IDENT, MAX_PLAINTEXT,
+        create_persistent_key, list_columns, load_postgres_resource, map_key_error, valid,
+    };
+    use crate::domain::state::idle_state;
+
+    fn err_message<T>(result: Result<T, (StatusCode, &'static str)>) -> &'static str {
+        match result {
+            Err((_, message)) => message,
+            Ok(_) => panic!("expected a request error"),
+        }
+    }
+
+    fn request() -> CreateResourceRequest {
+        CreateResourceRequest {
+            username: "user".into(),
+            password: SecretString::from("secret"),
+            allow_upstream: true,
+            allow_downstream: true,
+            config: ResourceConfig {
+                host: "localhost".into(),
+                port: 5432,
+                database_name: "app".into(),
+                table: "users".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn valid_rejects_each_failed_conjunct() {
+        assert!(valid(&request(), b"config"));
+
+        let mut req = request();
+        req.username.clear();
+        assert!(!valid(&req, b"config"));
+
+        let mut req = request();
+        req.username = "a".repeat(MAX_PLAINTEXT + 1);
+        assert!(!valid(&req, b"config"));
+
+        let mut req = request();
+        req.password = SecretString::from("");
+        assert!(!valid(&req, b"config"));
+
+        let mut req = request();
+        req.password = SecretString::from("a".repeat(MAX_PLAINTEXT + 1));
+        assert!(!valid(&req, b"config"));
+
+        assert!(!valid(&request(), &vec![b'a'; MAX_PLAINTEXT + 1]));
+
+        let mut req = request();
+        req.config.host.clear();
+        assert!(!valid(&req, b"config"));
+
+        let mut req = request();
+        req.config.database_name = "bad-name".into();
+        assert!(!valid(&req, b"config"));
+
+        let mut req = request();
+        req.config.table = "bad-name".into();
+        assert!(!valid(&req, b"config"));
+    }
+
+    #[tokio::test]
+    async fn column_and_key_guards_reject_unsafe_names_before_io() {
+        let state = idle_state();
+        let id = Uuid::nil();
+        let long = "a".repeat(MAX_IDENT + 1);
+
+        assert_eq!(
+            err_message(list_columns(&state, id, &long, "users").await),
+            "invalid schema"
+        );
+        assert_eq!(
+            err_message(list_columns(&state, id, "bad-schema", "users").await),
+            "invalid schema"
+        );
+        assert_eq!(
+            err_message(list_columns(&state, id, "public", &long).await),
+            "invalid table"
+        );
+        assert_eq!(
+            err_message(list_columns(&state, id, "public", "bad-table").await),
+            "invalid table"
+        );
+
+        assert_eq!(
+            err_message(load_postgres_resource(&state, id, &long).await),
+            "invalid table"
+        );
+        assert_eq!(
+            err_message(load_postgres_resource(&state, id, "bad-table").await),
+            "invalid table"
+        );
+
+        assert_eq!(
+            err_message(
+                create_persistent_key(
+                    &state,
+                    id,
+                    CreatePersistentKeyRequest { name: long.clone() },
+                )
+                .await,
+            ),
+            "invalid persistent key"
+        );
+        assert_eq!(
+            err_message(
+                create_persistent_key(
+                    &state,
+                    id,
+                    CreatePersistentKeyRequest {
+                        name: "bad key".into(),
+                    },
+                )
+                .await,
+            ),
+            "invalid persistent key"
+        );
+    }
+
+    #[test]
+    fn a_non_database_key_error_is_internal() {
+        let (status, message) = map_key_error(sqlx::Error::PoolClosed);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(message, "internal server error");
+    }
+}

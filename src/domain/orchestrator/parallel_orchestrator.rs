@@ -115,3 +115,293 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    use super::{OrchestratorError, ParallelOrchestrator};
+    use crate::domain::resource::{
+        Config, ConnectionError, PullError, PushError, Record, Resource, ResourceConnection, Rules,
+        SanitizeError, SanitizedRecord, SyncUpConfigError,
+    };
+    use crate::domain::resource_map::{
+        PairConfig, PullBatchStrategy, ResourceMap, ResourceMapStore,
+    };
+    use crate::domain::sanitizer::in_memory_sanitizer::{InMemorySanitizer, SanitizeStorage};
+
+    #[derive(Clone)]
+    struct FakeConfig {
+        fail_connect: bool,
+        pull_err: bool,
+        sanitize_err: bool,
+        push_err: bool,
+        updated: PullBatchStrategy,
+    }
+
+    #[derive(Clone)]
+    struct FakeConn {
+        pull_err: bool,
+        sanitize_err: bool,
+        push_err: bool,
+        updated: PullBatchStrategy,
+    }
+
+    #[async_trait::async_trait]
+    impl Config<FakeConfig, InMemorySanitizer> for FakeConfig {
+        type Connection = FakeConn;
+
+        async fn connect(&mut self) -> Result<FakeConn, ConnectionError> {
+            if self.fail_connect {
+                return Err(ConnectionError::FailedToConnect);
+            }
+            Ok(FakeConn {
+                pull_err: self.pull_err,
+                sanitize_err: self.sanitize_err,
+                push_err: self.push_err,
+                updated: self.updated.clone(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ResourceConnection<FakeConfig, InMemorySanitizer> for FakeConn {
+        async fn pull(
+            &self,
+            _tx: mpsc::Sender<Vec<Record>>,
+            _rules: Rules,
+            _strategy: PullBatchStrategy,
+        ) -> Result<PullBatchStrategy, PullError> {
+            if self.pull_err {
+                Err(PullError::UnexpectedFailed)
+            } else {
+                Ok(self.updated.clone())
+            }
+        }
+
+        async fn sanitize(
+            &self,
+            _tx: mpsc::Sender<Vec<SanitizedRecord>>,
+            _rx: mpsc::Receiver<Vec<Record>>,
+            _rules: Rules,
+            _sanitizer: InMemorySanitizer,
+        ) -> Result<(), SanitizeError> {
+            if self.sanitize_err {
+                Err(SanitizeError::SanitizerFailed)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn push(
+            &self,
+            _rules: Rules,
+            _rx: mpsc::Receiver<Vec<SanitizedRecord>>,
+        ) -> Result<(), PushError> {
+            if self.push_err {
+                Err(PushError::UnexpectedFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StoreFail {
+        Persist,
+    }
+
+    #[derive(Clone)]
+    struct FakeStore {
+        fail: Option<StoreFail>,
+        saved: Arc<Mutex<Option<Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ResourceMapStore for FakeStore {
+        async fn update_pair_config(
+            &self,
+            _resource_map_id: Uuid,
+            pair_config: &PairConfig,
+        ) -> Result<(), SyncUpConfigError> {
+            match self.fail {
+                Some(StoreFail::Persist) => Err(SyncUpConfigError::PersistFailed),
+                None => {
+                    *self.saved.lock().expect("saved config") = Some(pair_config.to_json());
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    struct Case {
+        allow_down: bool,
+        allow_up: bool,
+        source_connect_fails: bool,
+        target_connect_fails: bool,
+        pull_fails: bool,
+        sanitize_fails: bool,
+        push_fails: bool,
+        store_fails: bool,
+    }
+
+    impl Default for Case {
+        fn default() -> Self {
+            Self {
+                allow_down: true,
+                allow_up: true,
+                source_connect_fails: false,
+                target_connect_fails: false,
+                pull_fails: false,
+                sanitize_fails: false,
+                push_fails: false,
+                store_fails: false,
+            }
+        }
+    }
+
+    fn rules() -> Rules {
+        Rules::from_stored(
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            &json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": "id",
+                "source_sanitize_fields": []
+            }),
+        )
+        .unwrap()
+    }
+
+    fn updated_strategy() -> PullBatchStrategy {
+        PullBatchStrategy::Cursor {
+            field: "id".into(),
+            pointer: Some("7".into()),
+        }
+    }
+
+    async fn run_case(case: Case) -> Result<Value, OrchestratorError> {
+        let updated = updated_strategy();
+        let source = Resource::new(
+            Uuid::nil(),
+            true,
+            case.allow_down,
+            FakeConfig {
+                fail_connect: case.source_connect_fails,
+                pull_err: case.pull_fails,
+                sanitize_err: case.sanitize_fails,
+                push_err: false,
+                updated: updated.clone(),
+            },
+        );
+        let target = Resource::new(
+            Uuid::from_u128(1),
+            case.allow_up,
+            true,
+            FakeConfig {
+                fail_connect: case.target_connect_fails,
+                pull_err: false,
+                sanitize_err: false,
+                push_err: case.push_fails,
+                updated,
+            },
+        );
+        let resource_map = ResourceMap::new(
+            Uuid::from_u128(3),
+            Uuid::nil(),
+            Uuid::from_u128(1),
+            "users".into(),
+            "users_out".into(),
+            PairConfig::new(PullBatchStrategy::Cursor {
+                field: "id".into(),
+                pointer: None,
+            }),
+        );
+        let saved = Arc::new(Mutex::new(None));
+        let store = FakeStore {
+            fail: case.store_fails.then_some(StoreFail::Persist),
+            saved: saved.clone(),
+        };
+        let sanitizer = InMemorySanitizer::new(Mutex::new(SanitizeStorage {
+            map: HashMap::new(),
+        }));
+        ParallelOrchestrator::new(source, target, resource_map, store)
+            .run(rules(), sanitizer)
+            .await?;
+        Ok(saved.lock().expect("saved config").clone().unwrap())
+    }
+
+    #[tokio::test]
+    async fn each_failure_is_reported_before_later_steps() {
+        let mut case = Case::default();
+        case.allow_down = false;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::DownstreamNotAllowed
+        ));
+
+        let mut case = Case::default();
+        case.allow_up = false;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::UpstreamNotAllowed
+        ));
+
+        let mut case = Case::default();
+        case.source_connect_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::SourceConnectionFailed
+        ));
+
+        let mut case = Case::default();
+        case.target_connect_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::TargetConnectionFailed
+        ));
+
+        let mut case = Case::default();
+        case.pull_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::PullFailed
+        ));
+
+        let mut case = Case::default();
+        case.sanitize_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::SanitizeFailed
+        ));
+
+        let mut case = Case::default();
+        case.push_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::PushFailed
+        ));
+
+        let mut case = Case::default();
+        case.store_fails = true;
+        assert!(matches!(
+            run_case(case).await.unwrap_err(),
+            OrchestratorError::SyncUpConfigFailed
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_successful_run_stores_the_strategy_returned_by_pull() {
+        let saved = run_case(Case::default()).await.unwrap();
+        assert_eq!(saved["pull_batch_strategy"], "cursor");
+        assert_eq!(saved["pull_batch_field"], "id");
+        assert_eq!(saved["pull_batch_checkpoint"], "7");
+    }
+}

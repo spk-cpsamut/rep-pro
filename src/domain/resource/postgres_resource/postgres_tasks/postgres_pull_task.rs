@@ -237,7 +237,17 @@ fn is_safe_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::cursor_query;
+    use serde_json::{Value, json};
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    use super::{
+        PullBatchSize, cursor_query, fetch_sample_row, is_safe_ident, is_safe_type_name,
+        json_value_to_checkpoint, pull_task,
+    };
+    use crate::domain::resource::{PullError, Record, Rules};
+    use crate::domain::resource_map::PullBatchStrategy;
 
     #[test]
     fn limit_placeholder_is_separated_from_the_keyword() {
@@ -261,6 +271,105 @@ mod tests {
             query.sql(),
             "SELECT * FROM users WHERE 1=1 AND created_at > $1::timestamp with time zone ORDER BY created_at LIMIT $2"
         );
+    }
+
+    #[test]
+    fn checkpoint_text_covers_every_json_kind() {
+        assert_eq!(json_value_to_checkpoint(&Value::Null), "");
+        assert_eq!(json_value_to_checkpoint(&json!(false)), "false");
+        assert_eq!(json_value_to_checkpoint(&json!(10)), "10");
+        assert_eq!(json_value_to_checkpoint(&json!("abc")), "abc");
+        assert_eq!(json_value_to_checkpoint(&json!([1])), "[1]");
+        assert_eq!(json_value_to_checkpoint(&json!({"a": 1})), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn ident_and_type_name_reject_empty_and_unsafe_characters() {
+        assert!(!is_safe_ident(""));
+        assert!(!is_safe_ident("1id"));
+        assert!(is_safe_ident("_id"));
+        assert!(!is_safe_type_name(""));
+        assert!(is_safe_type_name("timestamp with time zone"));
+        assert!(!is_safe_type_name("int;drop"));
+    }
+
+    fn rules() -> Rules {
+        Rules::from_stored(
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            &json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": "id",
+                "source_sanitize_fields": []
+            }),
+        )
+        .unwrap()
+    }
+
+    fn lazy_pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_unsafe_names_and_limit_offset_before_querying() {
+        let (tx, _rx) = mpsc::channel::<Vec<Record>>(1);
+        let unsafe_table = pull_task(
+            Uuid::nil(),
+            PullBatchStrategy::Cursor {
+                field: "id".into(),
+                pointer: None,
+            },
+            "bad-table".into(),
+            PullBatchSize::new(10),
+            lazy_pool(),
+            rules(),
+            tx,
+        )
+        .await;
+        assert!(matches!(unsafe_table, Err(PullError::FailedToExtractData)));
+
+        let (tx, _rx) = mpsc::channel::<Vec<Record>>(1);
+        let unsafe_field = pull_task(
+            Uuid::nil(),
+            PullBatchStrategy::Cursor {
+                field: "bad-field".into(),
+                pointer: None,
+            },
+            "users".into(),
+            PullBatchSize::new(10),
+            lazy_pool(),
+            rules(),
+            tx,
+        )
+        .await;
+        assert!(matches!(unsafe_field, Err(PullError::FailedToExtractData)));
+
+        let (tx, _rx) = mpsc::channel::<Vec<Record>>(1);
+        let limit_offset = pull_task(
+            Uuid::nil(),
+            PullBatchStrategy::LimitOffSet {
+                field: "id".into(),
+                offset: None,
+            },
+            "users".into(),
+            PullBatchSize::new(10),
+            lazy_pool(),
+            rules(),
+            tx,
+        )
+        .await;
+        assert!(matches!(limit_offset, Err(PullError::UnexpectedFailed)));
+    }
+
+    #[tokio::test]
+    async fn sample_row_rejects_an_unsafe_table_or_order() {
+        let pool = lazy_pool();
+        assert!(fetch_sample_row(&pool, "bad-table", "id").await.is_err());
+        assert!(fetch_sample_row(&pool, "users", "bad-id").await.is_err());
     }
 }
 

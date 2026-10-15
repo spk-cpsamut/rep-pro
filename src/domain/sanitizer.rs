@@ -43,3 +43,45 @@ pub mod errors {
         StoreFailed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::generate_mock_text;
+    use crate::domain::resource::SanitizeType;
+
+    fn is_ssn(value: &str) -> bool {
+        let mut parts = value.split('-');
+        let Some(area) = parts.next() else {
+            return false;
+        };
+        let Some(group) = parts.next() else {
+            return false;
+        };
+        let Some(serial) = parts.next() else {
+            return false;
+        };
+        parts.next().is_none()
+            && area.len() == 3
+            && group.len() == 2
+            && serial.len() == 4
+            && area
+                .chars()
+                .chain(group.chars())
+                .chain(serial.chars())
+                .all(|c| c.is_ascii_digit())
+    }
+
+    #[test]
+    fn mock_text_matches_each_sanitize_type() {
+        let name = generate_mock_text(&SanitizeType::Name);
+        let email = generate_mock_text(&SanitizeType::Email);
+        let phone = generate_mock_text(&SanitizeType::PhoneNumber);
+        let ssn = generate_mock_text(&SanitizeType::Ssn);
+
+        assert!(!name.is_empty());
+        assert!(!email.is_empty());
+        assert!(email.contains('@'));
+        assert!(!phone.is_empty());
+        assert!(is_ssn(&ssn));
+    }
+}

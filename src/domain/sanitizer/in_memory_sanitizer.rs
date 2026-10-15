@@ -148,4 +148,103 @@ mod tests {
         assert_ne!(row["name"], "Ava Martinez");
         assert_ne!(row["email"], "ava@example.com");
     }
+
+    fn rules(fields: serde_json::Value) -> Rules {
+        Rules::from_stored(
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            &json!({
+                "force_pull_from_start": false,
+                "source_naming_convention": "snake_case",
+                "target_naming_convention": "snake_case",
+                "source_identifier": "id",
+                "source_sanitize_fields": fields
+            }),
+        )
+        .unwrap()
+    }
+
+    fn sanitizer() -> InMemorySanitizer {
+        InMemorySanitizer::new(Mutex::new(SanitizeStorage {
+            map: HashMap::new(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn repeated_identity_reuses_the_cached_value() {
+        let sanitizer = sanitizer();
+        let rules = rules(json!([{ "field_name": "name", "sanitize_type": "name" }]));
+        let once = sanitizer
+            .sanitize(
+                vec![Record::from_value(json!({"id": "1", "name": "Ava"}))],
+                rules.clone(),
+            )
+            .await
+            .unwrap();
+        let twice = sanitizer
+            .sanitize(
+                vec![Record::from_value(json!({"id": "1", "name": "Ava"}))],
+                rules,
+            )
+            .await
+            .unwrap();
+        assert_eq!(once[0]["name"], twice[0]["name"]);
+        assert_ne!(once[0]["name"], "Ava");
+    }
+
+    #[tokio::test]
+    async fn rows_that_share_an_identity_share_a_value() {
+        let sanitizer = sanitizer();
+        let rules = rules(json!([{ "field_name": "name", "sanitize_type": "name" }]));
+        let sanitized = sanitizer
+            .sanitize(
+                vec![
+                    Record::from_value(json!({"id": "1", "name": "Ava"})),
+                    Record::from_value(json!({"id": "1", "name": "Other"})),
+                ],
+                rules,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sanitized[0]["name"], sanitized[1]["name"]);
+        assert_ne!(sanitized[0]["name"], "Ava");
+    }
+
+    #[tokio::test]
+    async fn empty_batch_returns_no_rows() {
+        let sanitized = sanitizer()
+            .sanitize(
+                vec![],
+                rules(json!([{ "field_name": "name", "sanitize_type": "name" }])),
+            )
+            .await
+            .unwrap();
+        assert!(sanitized.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rule_with_no_sanitize_fields_copies_the_row() {
+        let sanitized = sanitizer()
+            .sanitize(
+                vec![Record::from_value(json!({"id": "7", "age": 3}))],
+                rules(json!([])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sanitized[0]["id"], "7");
+        assert_eq!(sanitized[0]["age"], 3);
+    }
+
+    #[tokio::test]
+    async fn a_missing_identifier_is_stored_as_null() {
+        let sanitized = sanitizer()
+            .sanitize(
+                vec![Record::from_value(json!({"name": "Ava"}))],
+                rules(json!([{ "field_name": "name", "sanitize_type": "name" }])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sanitized[0]["id"], serde_json::Value::Null);
+        assert_ne!(sanitized[0]["name"], "Ava");
+    }
 }

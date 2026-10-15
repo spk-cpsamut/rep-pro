@@ -79,3 +79,29 @@ async fn create_resource(
     let created = handler_inner::create_resource(&state, req).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+    use axum::extract::{Path, State};
+    use uuid::Uuid;
+
+    use super::{ColumnsQuery, bad_request, create_persistent_key, create_resource};
+    use crate::domain::state::idle_state;
+
+    #[tokio::test]
+    async fn a_body_that_is_not_json_is_a_bad_request() {
+        let state = idle_state();
+        let body = Bytes::from_static(b"not json");
+        let created = create_resource(State(state.clone()), body.clone()).await;
+        assert!(matches!(created, Err(got) if got == bad_request()));
+        let key = create_persistent_key(State(state), Path(Uuid::nil()), body).await;
+        assert!(matches!(key, Err(got) if got == bad_request()));
+    }
+
+    #[test]
+    fn columns_query_defaults_the_schema_to_public() {
+        let query: ColumnsQuery = serde_json::from_str(r#"{"table":"users"}"#).unwrap();
+        assert_eq!(query.schema, "public");
+    }
+}
