@@ -119,11 +119,24 @@ impl TryFrom<PairConfigJson> for PairConfig {
     }
 }
 
+#[derive(Debug)]
 pub enum PairConfigJsonError {
     InvalidJson,
     UnknownStrategy,
     InvalidCheckpoint,
 }
+
+impl std::fmt::Display for PairConfigJsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidJson => f.write_str("invalid pair config"),
+            Self::UnknownStrategy => f.write_str("unknown pull batch strategy"),
+            Self::InvalidCheckpoint => f.write_str("invalid pull batch checkpoint"),
+        }
+    }
+}
+
+impl std::error::Error for PairConfigJsonError {}
 
 #[cfg(test)]
 mod tests {

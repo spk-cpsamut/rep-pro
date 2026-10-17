@@ -47,11 +47,19 @@ pub async fn pull_task(
                     };
                     let mut qb =
                         cursor_query(&table, &field, &column_type, bound, batch_size.get() as i64);
-                    qb.build()
-                        .fetch_all(&pg_pool)
-                        .await
-                        .map_err(|_| PullError::FailedToExtractData)?
+                    qb.build().fetch_all(&pg_pool).await.map_err(|err| {
+                        tracing::error!(error = %err, "pull failed");
+                        PullError::FailedToExtractData
+                    })?
                 };
+
+                tracing::info!(
+                    %table,
+                    checkpoint_field = %field,
+                    batch_size = batch_size.get(),
+                    rows = rows.len(),
+                    "pull batch"
+                );
 
                 if rows.is_empty() {
                     break;
@@ -114,7 +122,9 @@ pub(crate) async fn fetch_sample_row(
     let row = sqlx::query(&sql)
         .fetch_optional(pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|err| {
+            tracing::warn!(error = %err, "cannot query table");
+        })?;
     let Some(row) = row else {
         return Ok(None);
     };
@@ -213,7 +223,10 @@ async fn column_type_name(
     .bind(column)
     .fetch_optional(pool)
     .await
-    .map_err(|_| PullError::FailedToExtractData)?;
+    .map_err(|err| {
+        tracing::error!(error = %err, "pull failed");
+        PullError::FailedToExtractData
+    })?;
 
     let type_name = type_name.ok_or(PullError::FailedToExtractData)?;
     if !is_safe_type_name(&type_name) {

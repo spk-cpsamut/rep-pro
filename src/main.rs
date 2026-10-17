@@ -1,7 +1,11 @@
+mod telemetry;
+
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
+    telemetry::init();
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL")?;
     let kms_key_id = std::env::var("KMS_KEY_ID")?;

@@ -4,7 +4,9 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domain::http::{MAX_IDENT, internal_error, is_safe_ident};
+use crate::domain::http::{
+    MAX_IDENT, fail_internal, fail_internal_msg, internal_error, is_safe_ident,
+};
 use crate::domain::orchestrator::{OrchestratorError, ParallelOrchestrator};
 use crate::domain::resource::postgres_resource::fetch_sample_row;
 use crate::domain::resource::{Record, Rules, connect_resource, load_postgres_resource};
@@ -32,6 +34,7 @@ const NAMING_CONVENTIONS: &[&str] = &[
 
 const SANITIZE_TYPES: &[&str] = &["name", "email", "phone_number", "ssn"];
 
+#[tracing::instrument(skip(state))]
 pub(crate) async fn list_resource_maps(
     state: &AppState,
 ) -> Result<Vec<ResourceMapSummary>, (StatusCode, &'static str)> {
@@ -39,12 +42,12 @@ pub(crate) async fn list_resource_maps(
         .resource_maps
         .list_maps()
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
     let rules = state
         .resource_maps
         .list_rules()
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
 
     let mut rules_by_map: HashMap<Uuid, Vec<RuleSummary>> = HashMap::new();
     for rule in rules {
@@ -63,6 +66,15 @@ pub(crate) async fn list_resource_maps(
         .collect())
 }
 
+#[tracing::instrument(
+    skip(state, req),
+    fields(
+        resource_source = %req.resource_source,
+        resource_target = %req.resource_target,
+        table_source = %req.table_source,
+        table_target = %req.table_target,
+    )
+)]
 pub(crate) async fn create_resource_map(
     state: &AppState,
     req: CreateResourceMapRequest,
@@ -74,17 +86,17 @@ pub(crate) async fn create_resource_map(
         .resource_maps
         .begin()
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
     let source = state
         .resource_maps
         .load_flags(&mut tx, req.resource_source)
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
     let target = state
         .resource_maps
         .load_flags(&mut tx, req.resource_target)
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
     let source = source.ok_or((StatusCode::BAD_REQUEST, "resource not found"))?;
     let target = target.ok_or((StatusCode::BAD_REQUEST, "resource not found"))?;
     if !source.allow_downstream {
@@ -112,7 +124,7 @@ pub(crate) async fn create_resource_map(
             .resource_maps
             .find_persistent_key(&mut tx, req.resource_source, &rule.persistent_key)
             .await
-            .map_err(|_| internal_error())?
+            .map_err(|err| fail_internal(&err))?
             .ok_or((StatusCode::BAD_REQUEST, "persistent key not found"))?;
         let rule_id = state
             .resource_maps
@@ -130,27 +142,50 @@ pub(crate) async fn create_resource_map(
         .resource_maps
         .commit(tx)
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
+    tracing::info!(%resource_map_id, "resource map created");
     Ok(CreatedResourceMap {
         resource_map_id,
         rule_ids,
     })
 }
 
+#[tracing::instrument(
+    skip(state),
+    fields(
+        resource_map_id = %id,
+        resource_source = tracing::field::Empty,
+        resource_target = tracing::field::Empty,
+        table_source = tracing::field::Empty,
+        table_target = tracing::field::Empty,
+    )
+)]
 pub(crate) async fn preview_sanitize(
     state: &AppState,
     id: Uuid,
 ) -> Result<SanitizePreview, (StatusCode, &'static str)> {
     let prepared = prepare_sanitize(state, id).await?;
+    record_prepared(&prepared);
     let sanitizer = persistent_sanitizer(state);
     examples_for(&prepared, &sanitizer).await
 }
 
+#[tracing::instrument(
+    skip(state),
+    fields(
+        resource_map_id = %id,
+        resource_source = tracing::field::Empty,
+        resource_target = tracing::field::Empty,
+        table_source = tracing::field::Empty,
+        table_target = tracing::field::Empty,
+    )
+)]
 pub(crate) async fn run_sanitize(
     state: &AppState,
     id: Uuid,
 ) -> Result<SanitizePreview, (StatusCode, &'static str)> {
     let prepared = prepare_sanitize(state, id).await?;
+    record_prepared(&prepared);
     if !valid_table(&prepared.table_target) {
         return Err((StatusCode::BAD_REQUEST, "invalid table_target"));
     }
@@ -176,6 +211,7 @@ pub(crate) async fn run_sanitize(
             .await
             .map_err(orchestrator_error)?;
     }
+    tracing::info!("sanitize run finished");
     examples_for(&prepared, &sanitizer).await
 }
 
@@ -210,17 +246,17 @@ async fn prepare_sanitize(
         .pair_config
         .get("pull_batch_field")
         .and_then(Value::as_str)
-        .ok_or(internal_error())?
+        .ok_or_else(|| fail_internal_msg("missing pull batch field"))?
         .to_owned();
     if !is_safe_ident(&pull_field) {
         return Err((StatusCode::BAD_REQUEST, "invalid pull field"));
     }
-    let pair = PairConfig::from_json(map.pair_config).map_err(|_| internal_error())?;
+    let pair = PairConfig::from_json(map.pair_config).map_err(|err| fail_internal(&err))?;
 
     let mut rules = Vec::with_capacity(map.rules.len());
     for entry in &map.rules {
         let parsed = Rules::from_stored(entry.rule_id, entry.persistent_key_id, &entry.rule)
-            .map_err(|_| internal_error())?;
+            .map_err(|_| fail_internal_msg("invalid stored rule"))?;
         require_ident(
             &parsed
                 .get_source_identifier()
@@ -236,7 +272,10 @@ async fn prepare_sanitize(
     let pool = connect_resource(state, map.resource_source).await?;
     let fetched = fetch_sample_row(&pool, &map.table_source, &pull_field).await;
     pool.close().await;
-    let fetched = fetched.map_err(|_| (StatusCode::BAD_REQUEST, "cannot query table"))?;
+    let fetched = fetched.map_err(|_| {
+        tracing::warn!("cannot query table");
+        (StatusCode::BAD_REQUEST, "cannot query table")
+    })?;
     let (mut columns, row) = fetched.ok_or((StatusCode::BAD_REQUEST, "source table is empty"))?;
     for rule in &rules {
         for field in rule.get_source_field() {
@@ -294,8 +333,11 @@ async fn preview_rule(
     let sanitized = sanitizer
         .preview(vec![Record::from_value(row.clone())], rules)
         .await
-        .map_err(|_| internal_error())?;
-    let after = sanitized.into_iter().next().ok_or(internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
+    let after = sanitized
+        .into_iter()
+        .next()
+        .ok_or_else(|| fail_internal_msg("sanitize preview returned no row"))?;
     Ok(SanitizeExample {
         rule_id,
         before: row.clone(),
@@ -314,8 +356,22 @@ fn overlay_sanitized(row: &Value, sanitized: &Value, fields: &[String]) -> Value
     Value::Object(after)
 }
 
+fn record_prepared(prepared: &PreparedSanitize) {
+    let span = tracing::Span::current();
+    span.record(
+        "resource_source",
+        tracing::field::display(prepared.resource_source),
+    );
+    span.record(
+        "resource_target",
+        tracing::field::display(prepared.resource_target),
+    );
+    span.record("table_source", prepared.table_source.as_str());
+    span.record("table_target", prepared.table_target.as_str());
+}
+
 fn orchestrator_error(err: OrchestratorError) -> (StatusCode, &'static str) {
-    match err {
+    let mapped = match err {
         OrchestratorError::DownstreamNotAllowed => {
             (StatusCode::BAD_REQUEST, "source does not allow downstream")
         }
@@ -329,7 +385,13 @@ fn orchestrator_error(err: OrchestratorError) -> (StatusCode, &'static str) {
         OrchestratorError::SanitizeFailed => (StatusCode::BAD_REQUEST, "sanitize failed"),
         OrchestratorError::PushFailed => (StatusCode::BAD_REQUEST, "cannot write to target"),
         OrchestratorError::SyncUpConfigFailed => internal_error(),
+    };
+    if mapped.0.is_server_error() {
+        tracing::error!(error = mapped.1, "sanitize run failed");
+    } else {
+        tracing::warn!(error = mapped.1, "sanitize run rejected");
     }
+    mapped
 }
 
 fn require_ident(name: &str, message: &'static str) -> Result<(), (StatusCode, &'static str)> {

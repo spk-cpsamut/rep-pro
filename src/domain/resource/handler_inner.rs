@@ -9,7 +9,9 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
-use crate::domain::http::{MAX_IDENT, bad_request, internal_error, is_safe_ident};
+use crate::domain::http::{
+    MAX_IDENT, bad_request, fail_internal, fail_internal_msg, is_safe_ident,
+};
 use crate::domain::state::AppState;
 
 use super::Resource;
@@ -24,13 +26,27 @@ use crate::domain::sanitizer::persistent_sanitizer::PersistentSanitizer;
 const MAX_PLAINTEXT: usize = 4096;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[tracing::instrument(skip(state))]
 pub(crate) async fn list_resources(
     state: &AppState,
 ) -> Result<Vec<ResourceSummary>, (StatusCode, &'static str)> {
-    let rows = state.resources.list().await.map_err(|_| internal_error())?;
+    let rows = state
+        .resources
+        .list()
+        .await
+        .map_err(|err| fail_internal(&err))?;
     Ok(rows.into_iter().map(ResourceSummary::from).collect())
 }
 
+#[tracing::instrument(
+    skip(state, req),
+    fields(
+        host = %req.config.host,
+        port = req.config.port,
+        database = %req.config.database_name,
+        table = %req.config.table,
+    )
+)]
 pub(crate) async fn create_resource(
     state: &AppState,
     req: CreateResourceRequest,
@@ -42,7 +58,7 @@ pub(crate) async fn create_resource(
         "database_name": req.config.database_name,
         "table": req.config.table,
     }))
-    .map_err(|_| internal_error())?;
+    .map_err(|err| fail_internal(&err))?;
 
     if !valid(&req, &config_bytes) {
         return Err(bad_request());
@@ -55,7 +71,7 @@ pub(crate) async fn create_resource(
         encrypt(state, "password", req.password.expose_secret().as_bytes()),
         encrypt(state, "config", &config_bytes),
     )
-    .map_err(|_| internal_error())?;
+    .map_err(|err| fail_internal(err.as_ref()))?;
 
     let resource_id = state
         .resources
@@ -67,11 +83,13 @@ pub(crate) async fn create_resource(
             req.allow_downstream,
         )
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
 
+    tracing::info!(%resource_id, "resource created");
     Ok(CreatedResource { resource_id })
 }
 
+#[tracing::instrument(skip(state), fields(resource_id = %id, schema, table))]
 pub(crate) async fn list_columns(
     state: &AppState,
     id: Uuid,
@@ -108,7 +126,10 @@ pub(crate) async fn connect_resource(
         .acquire_timeout(CONNECT_TIMEOUT)
         .connect_with(options)
         .await
-        .map_err(|_| cannot_connect())
+        .map_err(|err| {
+            tracing::warn!(error = %err, "cannot connect to database");
+            cannot_connect()
+        })
 }
 
 pub(crate) async fn load_postgres_resource(
@@ -119,7 +140,11 @@ pub(crate) async fn load_postgres_resource(
     if table.len() > MAX_IDENT || !is_safe_ident(table) {
         return Err((StatusCode::BAD_REQUEST, "invalid table"));
     }
-    let rows = state.resources.list().await.map_err(|_| internal_error())?;
+    let rows = state
+        .resources
+        .list()
+        .await
+        .map_err(|err| fail_internal(&err))?;
     let flags = rows
         .into_iter()
         .find(|row| row.id == id)
@@ -127,11 +152,14 @@ pub(crate) async fn load_postgres_resource(
     let (username, password, config) = decrypted_resource(state, id).await?;
     let postgres = PostgresConfig::new(
         id,
-        Host::new(config.host).map_err(|_| internal_error())?,
+        Host::new(config.host).map_err(|_| fail_internal_msg("invalid host"))?,
         config.port,
-        Username::parse(SecretString::from(username)).map_err(|_| internal_error())?,
-        Password::parse(SecretString::from(password)).map_err(|_| internal_error())?,
-        DatabaseName::parse(config.database_name).map_err(|_| internal_error())?,
+        Username::parse(SecretString::from(username))
+            .map_err(|_| fail_internal_msg("invalid username"))?,
+        Password::parse(SecretString::from(password))
+            .map_err(|_| fail_internal_msg("invalid password"))?,
+        DatabaseName::parse(config.database_name)
+            .map_err(|_| fail_internal_msg("invalid database"))?,
         table.to_owned(),
     );
     Ok(Resource::new(
@@ -150,7 +178,7 @@ async fn decrypted_resource(
         .resources
         .load_ciphertext(id)
         .await
-        .map_err(|_| internal_error())?
+        .map_err(|err| fail_internal(&err))?
         .ok_or((StatusCode::BAD_REQUEST, "resource not found"))?;
 
     let (username, password, config) = tokio::try_join!(
@@ -158,11 +186,11 @@ async fn decrypted_resource(
         decrypt(state, "password", &row.password),
         decrypt(state, "config", &row.config),
     )
-    .map_err(|_| internal_error())?;
+    .map_err(|err| fail_internal(err.as_ref()))?;
 
-    let username = String::from_utf8(username).map_err(|_| internal_error())?;
-    let password = String::from_utf8(password).map_err(|_| internal_error())?;
-    let config = serde_json::from_slice(&config).map_err(|_| internal_error())?;
+    let username = String::from_utf8(username).map_err(|err| fail_internal(&err))?;
+    let password = String::from_utf8(password).map_err(|err| fail_internal(&err))?;
+    let config = serde_json::from_slice(&config).map_err(|err| fail_internal(&err))?;
     Ok((username, password, config))
 }
 
@@ -205,7 +233,10 @@ async fn query_columns(
     .bind(table)
     .fetch_all(pool)
     .await
-    .map_err(|_| cannot_query())
+    .map_err(|err| {
+        tracing::warn!(error = %err, "cannot query table");
+        cannot_query()
+    })
 }
 
 async fn probe_resource(req: &CreateResourceRequest) -> Result<(), (StatusCode, &'static str)> {
@@ -221,15 +252,22 @@ async fn probe_resource(req: &CreateResourceRequest) -> Result<(), (StatusCode, 
         .acquire_timeout(CONNECT_TIMEOUT)
         .connect_with(options)
         .await
-        .map_err(|_| cannot_connect())?;
+        .map_err(|err| {
+            tracing::warn!(error = %err, "cannot connect to database");
+            cannot_connect()
+        })?;
 
     let sql = format!("SELECT * FROM {} LIMIT 1", req.config.table);
     let queried = sqlx::query(&sql).fetch_optional(&pool).await;
     pool.close().await;
-    queried.map_err(|_| cannot_query())?;
+    queried.map_err(|err| {
+        tracing::warn!(error = %err, "cannot query table");
+        cannot_query()
+    })?;
     Ok(())
 }
 
+#[tracing::instrument(skip(state), fields(%resource_id))]
 pub(crate) async fn list_persistent_keys(
     state: &AppState,
     resource_id: Uuid,
@@ -241,7 +279,7 @@ pub(crate) async fn list_persistent_keys(
         .resources
         .list_persistent_keys(resource_id)
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| fail_internal(&err))?;
     Ok(rows
         .into_iter()
         .map(|row| PersistentKeySummary {
@@ -251,6 +289,7 @@ pub(crate) async fn list_persistent_keys(
         .collect())
 }
 
+#[tracing::instrument(skip(state, req), fields(%resource_id))]
 pub(crate) async fn create_persistent_key(
     state: &AppState,
     resource_id: Uuid,
@@ -267,6 +306,7 @@ pub(crate) async fn create_persistent_key(
         .insert_persistent_key(resource_id, &req.name)
         .await
         .map_err(map_key_error)?;
+    tracing::info!(%resource_id, id = %row.id, "persistent key created");
     Ok(CreatedPersistentKey {
         id: row.id,
         name: row.name,
@@ -282,18 +322,20 @@ async fn resource_exists(
         .resources
         .resource_exists(resource_id)
         .await
-        .map_err(|_| internal_error())
+        .map_err(|err| fail_internal(&err))
 }
 
 fn map_key_error(err: sqlx::Error) -> (StatusCode, &'static str) {
     match &err {
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            tracing::warn!("persistent key already exists");
             (StatusCode::CONFLICT, "persistent key already exists")
         }
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+            tracing::warn!("resource not found");
             (StatusCode::BAD_REQUEST, "resource not found")
         }
-        _ => internal_error(),
+        _ => fail_internal(&err),
     }
 }
 
@@ -316,7 +358,7 @@ fn valid(req: &CreateResourceRequest, config_bytes: &[u8]) -> bool {
         && is_safe_ident(&req.config.table)
 }
 
-async fn decrypt(state: &AppState, field: &str, ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
+async fn decrypt(state: &AppState, field: &str, ciphertext: &[u8]) -> Result<Vec<u8>, KmsFailure> {
     let out = state
         .kms
         .decrypt()
@@ -325,11 +367,13 @@ async fn decrypt(state: &AppState, field: &str, ciphertext: &[u8]) -> Result<Vec
         .encryption_context("field", field)
         .send()
         .await
-        .map_err(|_| ())?;
-    out.plaintext().map(|blob| blob.as_ref().to_vec()).ok_or(())
+        .map_err(|err| Box::new(err) as KmsFailure)?;
+    out.plaintext()
+        .map(|blob| blob.as_ref().to_vec())
+        .ok_or_else(|| missing_kms("kms decrypt returned no plaintext"))
 }
 
-async fn encrypt(state: &AppState, field: &str, plaintext: &[u8]) -> Result<Vec<u8>, ()> {
+async fn encrypt(state: &AppState, field: &str, plaintext: &[u8]) -> Result<Vec<u8>, KmsFailure> {
     let out = state
         .kms
         .encrypt()
@@ -338,10 +382,16 @@ async fn encrypt(state: &AppState, field: &str, plaintext: &[u8]) -> Result<Vec<
         .encryption_context("field", field)
         .send()
         .await
-        .map_err(|_| ())?;
+        .map_err(|err| Box::new(err) as KmsFailure)?;
     out.ciphertext_blob()
         .map(|blob| blob.as_ref().to_vec())
-        .ok_or(())
+        .ok_or_else(|| missing_kms("kms encrypt returned no ciphertext"))
+}
+
+type KmsFailure = Box<dyn std::error::Error + Send + Sync>;
+
+fn missing_kms(message: &'static str) -> KmsFailure {
+    Box::new(std::io::Error::other(message))
 }
 
 #[cfg(test)]

@@ -42,6 +42,17 @@ pub mod errors {
         NotImplemented,
         StoreFailed,
     }
+
+    impl std::fmt::Display for SanitizerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::NotImplemented => f.write_str("sanitizer not implemented"),
+                Self::StoreFailed => f.write_str("value mapping store failed"),
+            }
+        }
+    }
+
+    impl std::error::Error for SanitizerError {}
 }
 
 #[cfg(test)]

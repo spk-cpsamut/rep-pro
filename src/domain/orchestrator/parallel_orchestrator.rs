@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::{
     resource::{Config, Record, Resource, ResourceConnection, Rules, SanitizedRecord},
-    resource_map::{PairConfig, ResourceMap, ResourceMapStore},
+    resource_map::{PairConfig, PullBatchStrategy, ResourceMap, ResourceMapStore},
     sanitizer::Sanitizer,
 };
 
@@ -54,6 +54,17 @@ where
         }
     }
 
+    #[tracing::instrument(
+        skip(self, rules, sanitizer),
+        fields(
+            resource_map_id = %self.resource_map.id(),
+            resource_source = %self.resource_map.resource_source(),
+            resource_target = %self.resource_map.resource_target(),
+            table_source = self.resource_map.table_source(),
+            table_target = self.resource_map.table_target(),
+            checkpoint_field = tracing::field::Empty,
+        )
+    )]
     pub async fn run(&mut self, rules: Rules, sanitizer: S1) -> Result<(), OrchestratorError>
     where
         T1::Connection: ResourceConnection<T1, S1>,
@@ -66,16 +77,16 @@ where
             return Err(OrchestratorError::UpstreamNotAllowed);
         }
 
-        let source_conn = self
-            .source
-            .connect()
-            .await
-            .map_err(|_| OrchestratorError::SourceConnectionFailed)?;
-        let target_conn = self
-            .target
-            .connect()
-            .await
-            .map_err(|_| OrchestratorError::TargetConnectionFailed)?;
+        let source_conn = self.source.connect().await.map_err(|err| {
+            tracing::error!(error = ?err, "source connection failed");
+            OrchestratorError::SourceConnectionFailed
+        })?;
+        tracing::info!("source connected");
+        let target_conn = self.target.connect().await.map_err(|err| {
+            tracing::error!(error = ?err, "target connection failed");
+            OrchestratorError::TargetConnectionFailed
+        })?;
+        tracing::info!("target connected");
 
         let (raw_tx, raw_rx) = mpsc::channel::<Vec<Record>>(8);
         let (clean_tx, clean_rx) = mpsc::channel::<Vec<SanitizedRecord>>(8);
@@ -85,34 +96,69 @@ where
             .pair_config()
             .pull_batch_strategy()
             .clone();
+        let field_name = checkpoint_field(&strategy).to_owned();
+        tracing::Span::current().record("checkpoint_field", field_name.as_str());
 
         let (updated_strategy, _, _) = tokio::try_join!(
             async {
-                source_conn
+                tracing::info!(checkpoint_field = %field_name, "pull started");
+                let updated = source_conn
                     .pull(raw_tx, rules.clone(), strategy)
                     .await
-                    .map_err(|_| OrchestratorError::PullFailed)
+                    .map_err(|err| {
+                        tracing::error!(error = ?err, "pull failed");
+                        OrchestratorError::PullFailed
+                    })?;
+                tracing::info!("pull finished");
+                Ok(updated)
             },
             async {
+                tracing::info!("sanitize started");
                 source_conn
                     .sanitize(clean_tx, raw_rx, rules.clone(), sanitizer)
                     .await
-                    .map_err(|_| OrchestratorError::SanitizeFailed)
+                    .map_err(|err| {
+                        tracing::error!(error = ?err, "sanitize failed");
+                        OrchestratorError::SanitizeFailed
+                    })?;
+                tracing::info!("sanitize finished");
+                Ok(())
             },
             async {
+                tracing::info!("push started");
                 target_conn
                     .push(rules.clone(), clean_rx)
                     .await
-                    .map_err(|_| OrchestratorError::PushFailed)
+                    .map_err(|err| {
+                        tracing::error!(error = ?err, "push failed");
+                        OrchestratorError::PushFailed
+                    })?;
+                tracing::info!("push finished");
+                Ok(())
             },
         )?;
 
         self.resource_map
-            .sync_up_config(&self.store, PairConfig::new(updated_strategy))
+            .sync_up_config(&self.store, PairConfig::new(updated_strategy.clone()))
             .await
-            .map_err(|_| OrchestratorError::SyncUpConfigFailed)?;
+            .map_err(|err| {
+                tracing::error!(error = ?err, "checkpoint sync failed");
+                OrchestratorError::SyncUpConfigFailed
+            })?;
+        tracing::info!(
+            checkpoint_field = %checkpoint_field(&updated_strategy),
+            "checkpoint synced"
+        );
 
         Ok(())
+    }
+}
+
+fn checkpoint_field(strategy: &PullBatchStrategy) -> &str {
+    match strategy {
+        PullBatchStrategy::Cursor { field, .. } | PullBatchStrategy::LimitOffSet { field, .. } => {
+            field
+        }
     }
 }
 

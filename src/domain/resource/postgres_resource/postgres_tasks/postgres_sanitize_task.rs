@@ -12,10 +12,15 @@ pub async fn sanitize_task(
     sanitizer: Box<dyn Sanitizer>,
 ) -> Result<(), SanitizeError> {
     while let Some(records) = rx.recv().await {
-        let sanitized_records = sanitizer
-            .sanitize(records, rules.clone())
-            .await
-            .map_err(|_| SanitizeError::SanitizerFailed)?;
+        tracing::info!(rows = records.len(), "sanitize batch");
+        let sanitized_records =
+            sanitizer
+                .sanitize(records, rules.clone())
+                .await
+                .map_err(|err| {
+                    tracing::error!(error = %err, "sanitize failed");
+                    SanitizeError::SanitizerFailed
+                })?;
 
         tx.send(sanitized_records)
             .await

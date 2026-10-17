@@ -350,23 +350,28 @@ pub trait ResourceConnection<T, S: Sanitizer> {
 }
 
 mod errors {
+    #[derive(Debug)]
     pub enum PullError {
         FailedToGetPointer,
         FailedToExtractData,
         UnexpectedFailed,
     }
+    #[derive(Debug)]
     pub enum PushError {
         UnexpectedFailed,
     }
+    #[derive(Debug)]
     pub enum SanitizeError {
         SanitizerFailed,
         UnexpectedFailed,
     }
 
+    #[derive(Debug)]
     pub enum ConnectionError {
         FailedToConnect,
     }
 
+    #[derive(Debug)]
     pub enum SyncUpConfigError {
         PersistFailed,
         MapNotFound,

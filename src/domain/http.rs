@@ -16,9 +16,19 @@ pub(crate) fn internal_error() -> (StatusCode, &'static str) {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
 }
 
+pub(crate) fn fail_internal(err: &(impl std::error::Error + ?Sized)) -> (StatusCode, &'static str) {
+    tracing::error!(error = %err, "internal error");
+    internal_error()
+}
+
+pub(crate) fn fail_internal_msg(message: &'static str) -> (StatusCode, &'static str) {
+    tracing::error!(error = message, "internal error");
+    internal_error()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bad_request, internal_error, is_safe_ident};
+    use super::{bad_request, fail_internal, internal_error, is_safe_ident};
     use axum::http::StatusCode;
 
     #[test]
@@ -37,5 +47,11 @@ mod tests {
             internal_error(),
             (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         );
+    }
+
+    #[test]
+    fn fail_internal_keeps_the_public_error() {
+        let err = std::io::Error::other("disk full");
+        assert_eq!(fail_internal(&err), internal_error());
     }
 }

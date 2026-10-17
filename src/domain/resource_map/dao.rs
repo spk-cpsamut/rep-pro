@@ -5,7 +5,7 @@ use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use super::PairConfig;
-use crate::domain::http::internal_error;
+use crate::domain::http::fail_internal;
 
 #[async_trait::async_trait]
 pub(crate) trait Dao: Send + Sync {
@@ -182,12 +182,14 @@ pub(crate) struct ResourceFlags {
 fn map_db_error(err: sqlx::Error) -> (StatusCode, &'static str) {
     match &err {
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+            tracing::warn!("resource map already exists");
             (StatusCode::CONFLICT, "resource map already exists")
         }
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+            tracing::warn!("resource not found");
             (StatusCode::BAD_REQUEST, "resource not found")
         }
-        _ => internal_error(),
+        _ => fail_internal(&err),
     }
 }
 

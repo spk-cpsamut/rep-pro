@@ -23,6 +23,7 @@ pub async fn push_task(
     let column_types = column_types(&pg_pool, &table).await?;
 
     while let Some(sanitized_records) = rx.recv().await {
+        tracing::info!(%table, rows = sanitized_records.len(), "push batch");
         if sanitized_records.is_empty() {
             continue;
         }
@@ -87,10 +88,10 @@ pub async fn push_task(
             }
         }
 
-        qb.build()
-            .execute(&pg_pool)
-            .await
-            .map_err(|_| PushError::UnexpectedFailed)?;
+        qb.build().execute(&pg_pool).await.map_err(|err| {
+            tracing::error!(error = %err, "push failed");
+            PushError::UnexpectedFailed
+        })?;
     }
 
     Ok(())
